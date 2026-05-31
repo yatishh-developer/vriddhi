@@ -41,7 +41,7 @@ class Settings(BaseSettings):
         # URL-encode password to handle special characters like @
         encoded_password = quote(self.DB_PASSWORD, safe='')
         return (
-            f"postgresql+psycopg2://{self.DB_USER}:{encoded_password}"
+            f"postgresql+psycopg://{self.DB_USER}:{encoded_password}"
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
             f"?sslmode=require"
         )
