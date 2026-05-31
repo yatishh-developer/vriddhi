@@ -51,6 +51,8 @@ class ProductService:
             name=product_data.name,
             barcode=product_data.barcode,
             price=product_data.price,
+            gst_percentage=product_data.gst_percentage or 0,
+            hsn_code=product_data.hsn_code or "",
             image_url=product_data.image_url,
             category=product_data.category,
             in_stock=in_stock,
@@ -138,20 +140,57 @@ class ProductService:
         }
     @staticmethod
     def handle_queue_item(db, current_user, action: str, payload: dict):
-        """Handle a queued offline product operation."""
+        """Handle a queued offline product operation.
+
+        `create` is treated as an UPSERT: if a product with the same id
+        already exists (e.g. the client re-syncs, or stock was decremented
+        after a sale), we update it instead of silently dropping the change.
+        Genuine validation errors propagate so the upload route can report
+        them back to the client instead of losing data.
+        """
         from schemas.product_schema import ProductCreate, ProductUpdate
+
         if action == "create":
-            try:
+            existing = ProductRepository.get_by_id(
+                db, payload.get("id"), current_user.business_id
+            )
+            if existing:
+                # Upsert: apply the incoming fields as an update.
+                update_fields = {
+                    k: v for k, v in payload.items() if k != "id"
+                }
+                data = ProductUpdate(**update_fields)
+                ProductService.update_product(
+                    db, current_user, payload["id"], data
+                )
+            else:
                 data = ProductCreate(**payload)
                 ProductService.create_product(db, current_user, data)
-            except Exception:
-                pass  # Already exists or validation error — skip
+
         elif action == "update":
             product_id = payload.get("id")
             if product_id:
-                data = ProductUpdate(**{k: v for k, v in payload.items() if k != "id"})
-                ProductService.update_product(db, current_user, product_id, data)
+                data = ProductUpdate(
+                    **{k: v for k, v in payload.items() if k != "id"}
+                )
+                # Tolerate updates that arrive before the create (offline
+                # ordering) by falling back to an upsert.
+                existing = ProductRepository.get_by_id(
+                    db, product_id, current_user.business_id
+                )
+                if existing:
+                    ProductService.update_product(
+                        db, current_user, product_id, data
+                    )
+                else:
+                    create_data = ProductCreate(**payload)
+                    ProductService.create_product(db, current_user, create_data)
+
         elif action == "delete":
             product_id = payload.get("id")
             if product_id:
-                ProductService.delete_product(db, current_user, product_id)
+                existing = ProductRepository.get_by_id(
+                    db, product_id, current_user.business_id
+                )
+                if existing:
+                    ProductService.delete_product(db, current_user, product_id)

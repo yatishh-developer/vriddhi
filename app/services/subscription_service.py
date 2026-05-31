@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 from fastapi import HTTPException
@@ -11,6 +11,23 @@ from models.subscription_model import (
     PLAN_PREMIUM,
 )
 from schemas.subscription_schema import PlanFeatures
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now. Used everywhere so comparisons against
+    timezone-aware DB columns (DateTime(timezone=True)) never raise
+    'can't compare offset-naive and offset-aware datetimes'."""
+    return datetime.now(timezone.utc)
+
+
+def _as_aware(dt: datetime) -> datetime:
+    """Normalise a datetime to timezone-aware UTC. Values read back from
+    some drivers/older rows may be naive — assume they are UTC."""
+    if dt is None:
+        return dt
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 # ── Plan catalogue ──────────────────────────────────────────────────────
@@ -145,7 +162,7 @@ class SubscriptionService:
         if sub:
             return sub
 
-        now = datetime.utcnow()
+        now = _utcnow()
         plan = PLAN_DEFAULTS[PLAN_FREE]
         sub = Subscription(
             business_id=business_id,
@@ -172,13 +189,13 @@ class SubscriptionService:
 
     @staticmethod
     def _roll_period_if_needed(db, sub: Subscription) -> Subscription:
-        now = datetime.utcnow()
-        if sub.current_period_end >= now:
+        now = _utcnow()
+        if _as_aware(sub.current_period_end) >= now:
             return sub
 
         if sub.auto_renew and sub.status == "active":
             # Renew the same plan for another period.
-            sub.current_period_start = sub.current_period_end
+            sub.current_period_start = _as_aware(sub.current_period_end)
             sub.current_period_end = _period_end(
                 sub.current_period_start, sub.billing_cycle
             )
@@ -208,7 +225,7 @@ class SubscriptionService:
         plan = get_plan(plan_code)
         sub = SubscriptionService._ensure_subscription(db, business_id)
 
-        now = datetime.utcnow()
+        now = _utcnow()
         sub.plan_code = plan.code
         sub.billing_cycle = billing_cycle
         sub.status = "active"
@@ -231,7 +248,7 @@ class SubscriptionService:
     def cancel(db, business_id: str):
         sub = SubscriptionService._ensure_subscription(db, business_id)
         sub.auto_renew = False
-        sub.cancelled_at = datetime.utcnow()
+        sub.cancelled_at = _utcnow()
         sub.status = "cancelled"
         db.commit()
         db.refresh(sub)

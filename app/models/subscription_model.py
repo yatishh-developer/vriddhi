@@ -1,10 +1,16 @@
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Column, String, DateTime, Boolean, Float, Integer, ForeignKey
 
 from database.database import Base
 from core.base_model import TimestampMixin
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now, so values stored in DateTime(timezone=True)
+    columns are consistent and never trigger naive/aware comparison errors."""
+    return datetime.now(timezone.utc)
 
 
 # ── Plan codes — keep in sync with SubscriptionService.PLAN_DEFAULTS ───────
@@ -43,8 +49,8 @@ class Subscription(Base, TimestampMixin):
     auto_renew = Column(Boolean, default=False, nullable=False)
 
     # ── Period window ────────────────────────────────────────────────────
-    started_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-    current_period_start = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    started_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    current_period_start = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     current_period_end = Column(DateTime(timezone=True), nullable=False)
     trial_ends_at = Column(DateTime(timezone=True), nullable=True)
     cancelled_at = Column(DateTime(timezone=True), nullable=True)

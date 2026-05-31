@@ -1,4 +1,16 @@
+# Environment / secrets
 .env
-venv
-__pycache__
+.env.*
+
+# Python
+venv/
+**/venv/
+__pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Misc
+require.txt
+.DS_Store
+**/.DS_Store

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends
@@ -23,10 +23,12 @@ def _to_response(sub) -> SubscriptionResponse:
     (including the computed days_remaining / is_expired / nested plan).
     """
     plan = get_plan(sub.plan_code)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     end = sub.current_period_end
-    if end.tzinfo is not None:
-        end = end.replace(tzinfo=None)
+    # Normalise to timezone-aware UTC so the subtraction never raises a
+    # naive/aware TypeError regardless of how the value came back from the DB.
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
     delta = end - now
     days_remaining = max(delta.days, 0) if delta.total_seconds() > 0 else 0
     is_expired = end < now or sub.status == "expired"

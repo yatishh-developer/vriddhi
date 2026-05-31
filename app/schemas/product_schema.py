@@ -14,6 +14,10 @@ class ProductBase(BaseModel):
 
     price: float
 
+    gst_percentage: float = 0
+
+    hsn_code: str | None = None
+
     image_url: str | None = None
 
     category: str | None = None
@@ -50,6 +54,10 @@ class ProductUpdate(BaseModel):
     barcode: str | None = None
 
     price: float | None = None
+
+    gst_percentage: float | None = None
+
+    hsn_code: str | None = None
 
     image_url: str | None = None
 
