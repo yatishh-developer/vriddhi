@@ -65,3 +65,30 @@ class UsageRecordRequest(BaseModel):
 
     invoices: int = 0
     ai_credits: int = 0
+
+
+class CreateOrderRequest(BaseModel):
+    """Ask the backend to create a Razorpay order for a plan purchase."""
+
+    plan_code: str
+    billing_cycle: str = "monthly"  # "monthly" | "yearly"
+
+
+class CreateOrderResponse(BaseModel):
+    order_id: str
+    amount: int  # in paise
+    currency: str
+    key_id: str
+    plan_code: str
+    billing_cycle: str
+
+
+class VerifyPaymentRequest(BaseModel):
+    """Razorpay checkout result, sent back for server-side verification."""
+
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    plan_code: str
+    billing_cycle: str = "monthly"
+    auto_renew: bool = False

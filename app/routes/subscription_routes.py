@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import List
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from auth.dependencies import get_current_user
@@ -11,8 +11,12 @@ from schemas.subscription_schema import (
     SubscriptionResponse,
     SubscribeRequest,
     UsageRecordRequest,
+    CreateOrderRequest,
+    CreateOrderResponse,
+    VerifyPaymentRequest,
 )
 from services.subscription_service import SubscriptionService, get_plan, list_plans
+from services.payment_service import PaymentService
 
 
 router = APIRouter(prefix="/subscriptions", tags=["Subscriptions"])
@@ -108,5 +112,64 @@ def record_usage(
         current_user.business_id,
         payload.invoices,
         payload.ai_credits,
+    )
+    return _to_response(sub)
+
+
+# ── Razorpay payment flow ─────────────────────────────────────────────────
+# 1. The app asks for an order (server talks to Razorpay, returns order id).
+# 2. The app opens Razorpay checkout with that order id.
+# 3. The app sends the checkout result back; the server verifies the HMAC
+#    signature and only THEN activates the plan. The plan is never activated
+#    on the client's word alone.
+
+
+@router.post("/create-order", response_model=CreateOrderResponse)
+def create_payment_order(
+    payload: CreateOrderRequest,
+    current_user=Depends(get_current_user),
+):
+    """Create a Razorpay order for a paid plan and return the checkout params."""
+    # Reject free plans early — they don't need a payment.
+    plan = get_plan(payload.plan_code)
+    price = plan.yearly_price if payload.billing_cycle == "yearly" else plan.monthly_price
+    if price <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="This plan is free — use /subscribe instead.",
+        )
+
+    return PaymentService.create_order(
+        business_id=current_user.business_id,
+        plan_code=payload.plan_code,
+        billing_cycle=payload.billing_cycle,
+    )
+
+
+@router.post("/verify-payment", response_model=SubscriptionResponse)
+def verify_payment(
+    payload: VerifyPaymentRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Verify a Razorpay payment and activate the subscription on success."""
+    ok = PaymentService.verify_signature(
+        order_id=payload.razorpay_order_id,
+        payment_id=payload.razorpay_payment_id,
+        signature=payload.razorpay_signature,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail="Payment verification failed. Plan was not activated.",
+        )
+
+    # Signature valid → activate the plan for this business.
+    sub = SubscriptionService.subscribe(
+        db,
+        current_user.business_id,
+        payload.plan_code,
+        payload.billing_cycle,
+        payload.auto_renew,
     )
     return _to_response(sub)

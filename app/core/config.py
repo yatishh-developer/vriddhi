@@ -10,7 +10,9 @@ class Settings(BaseSettings):
 
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    # Long-lived sessions: 365 days. A retail POS shouldn't log the owner out
+    # mid-day, so the access token stays valid for a year unless they log out.
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 525600
 
     # Database connection components (prefixed with DB_ to avoid system env collisions)
     DB_USER: str = Field(alias="DB_USER")
