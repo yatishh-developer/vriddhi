@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "789317746189",
+    "project_id": "vriddhi-staff-billing",
+    "storage_bucket": "vriddhi-staff-billing.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:789317746189:android:3826059f06d7ef03249f44",
+        "android_client_info": {
+          "package_name": "com.example.vriddhi_staff_billing_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDNQlgvABbPMvpXLG0T7qv7-5oEWiLEKdA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

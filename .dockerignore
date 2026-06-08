@@ -1,0 +1,15 @@
+.dart_tool/
+.idea/
+build/
+.git/
+.github/
+android/.gradle/
+ios/Pods/
+macos/Pods/
+linux/flutter/ephemeral/
+windows/flutter/ephemeral/
+*.iml
+*.log
+.DS_Store
+Dockerfile
+docker-compose.yml
