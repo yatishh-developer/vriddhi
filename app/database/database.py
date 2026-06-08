@@ -1,13 +1,18 @@
+import logging
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from core.config import settings
 
 
+logger = logging.getLogger("vriddhi.database")
+
+
 try:
     SQLALCHEMY_DATABASE_URL = settings.get_database_url()
 except Exception as e:
-    print(f"Error constructing the database URL: {e}")
+    logger.exception("Error constructing the database URL: %s", e)
     raise
 
 

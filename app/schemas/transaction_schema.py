@@ -28,6 +28,8 @@ class CreateTransactionRequest(BaseModel):
 
     cash_amount: Optional[float] = 0.0
     upi_amount: Optional[float] = 0.0
+    card_amount: Optional[float] = 0.0
+    other_paid_amount: Optional[float] = 0.0
     credit_amount: Optional[float] = 0.0
     discount: Optional[float] = 0.0
 
@@ -47,6 +49,11 @@ class CreateTransactionRequest(BaseModel):
     total: Optional[float] = 0.0
     old_balance: Optional[float] = 0.0
     is_intra_state: Optional[bool] = True
+    branch_id: Optional[str] = "main"
+    source_app: Optional[str] = "admin_app"
+    sync_status: Optional[str] = "synced"
+    idempotency_key: Optional[str] = None
+    device_id: Optional[str] = None
 
 
 class TransactionItemResponse(BaseModel):
@@ -81,6 +88,8 @@ class TransactionResponse(BaseModel):
 
     cash_amount: Optional[float] = 0.0
     upi_amount: Optional[float] = 0.0
+    card_amount: Optional[float] = 0.0
+    other_paid_amount: Optional[float] = 0.0
     credit_amount: Optional[float] = 0.0
     discount: Optional[float] = 0.0
 
@@ -98,6 +107,13 @@ class TransactionResponse(BaseModel):
     is_intra_state: Optional[bool] = True
 
     status: str
+    branch_id: Optional[str] = "main"
+    created_by: Optional[str] = None
+    created_by_staff_id: Optional[str] = None
+    source_app: Optional[str] = "admin_app"
+    sync_status: Optional[str] = "synced"
+    idempotency_key: Optional[str] = None
+    device_id: Optional[str] = None
     created_at: datetime
 
     class Config:

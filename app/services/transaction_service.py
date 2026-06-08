@@ -19,9 +19,18 @@ class TransactionService:
         if empty, only the JSON snapshot is stored (offline-first support).
         """
 
+        if payload.idempotency_key:
+            existing_by_key = db.query(Transaction).filter(
+                Transaction.business_id == current_user.business_id,
+                Transaction.idempotency_key == payload.idempotency_key,
+            ).first()
+            if existing_by_key:
+                return existing_by_key
+
         # Upsert: if already exists, just update totals
         existing = db.query(Transaction).filter(
-            Transaction.id == payload.id
+            Transaction.id == payload.id,
+            Transaction.business_id == current_user.business_id,
         ).first()
 
         if existing:
@@ -33,9 +42,15 @@ class TransactionService:
         transaction = Transaction(
             id=payload.id,
             business_id=current_user.business_id,
+            branch_id=payload.branch_id or "main",
             customer_id=payload.customer_id,
             payment_method=payload.payment_method or "Cash",
             total_amount=payload.total or 0.0,
+            created_by=current_user.id,
+            source_app=payload.source_app or "admin_app",
+            sync_status=payload.sync_status or "synced",
+            idempotency_key=payload.idempotency_key,
+            device_id=payload.device_id,
             status="completed"
         )
         TransactionService._apply_payload(transaction, payload)
@@ -93,6 +108,8 @@ class TransactionService:
         transaction.payment_option = payload.payment_option or payload.payment_method or "Cash"
         transaction.cash_amount = payload.cash_amount or 0.0
         transaction.upi_amount = payload.upi_amount or 0.0
+        transaction.card_amount = payload.card_amount or 0.0
+        transaction.other_paid_amount = payload.other_paid_amount or 0.0
         transaction.credit_amount = payload.credit_amount or 0.0
         transaction.discount = payload.discount or 0.0
         transaction.is_parcel = payload.is_parcel or False
@@ -105,6 +122,11 @@ class TransactionService:
         transaction.total_tax = payload.total_tax or 0.0
         transaction.old_balance = payload.old_balance or 0.0
         transaction.is_intra_state = payload.is_intra_state if payload.is_intra_state is not None else True
+        transaction.branch_id = payload.branch_id or transaction.branch_id or "main"
+        transaction.source_app = payload.source_app or transaction.source_app or "admin_app"
+        transaction.sync_status = payload.sync_status or transaction.sync_status or "synced"
+        transaction.idempotency_key = payload.idempotency_key or transaction.idempotency_key
+        transaction.device_id = payload.device_id or transaction.device_id
         if payload.total:
             transaction.total_amount = payload.total
 

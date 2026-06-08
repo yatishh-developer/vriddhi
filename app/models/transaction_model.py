@@ -15,6 +15,8 @@ class Transaction(Base, TimestampMixin):
         String, ForeignKey("businesses.id"), nullable=False, index=True
     )
 
+    branch_id = Column(String, nullable=True, default="main", index=True)
+
     customer_id = Column(
         String, ForeignKey("customers.id"), nullable=True
     )
@@ -35,6 +37,8 @@ class Transaction(Base, TimestampMixin):
 
     cash_amount = Column(Float, default=0.0)
     upi_amount = Column(Float, default=0.0)
+    card_amount = Column(Float, default=0.0)
+    other_paid_amount = Column(Float, default=0.0)
     credit_amount = Column(Float, default=0.0)
     discount = Column(Float, default=0.0)
 
@@ -55,5 +59,12 @@ class Transaction(Base, TimestampMixin):
     is_intra_state = Column(Boolean, default=True)
 
     status = Column(String, default="completed")
+
+    created_by = Column(String, ForeignKey("users.id"), nullable=True)
+    created_by_staff_id = Column(String, nullable=True, index=True)
+    source_app = Column(String, nullable=False, default="admin_app", index=True)
+    sync_status = Column(String, nullable=False, default="synced", index=True)
+    idempotency_key = Column(String, nullable=True, unique=True, index=True)
+    device_id = Column(String, nullable=True)
 
     items = relationship("TransactionItem", back_populates="transaction", cascade="all, delete-orphan")
