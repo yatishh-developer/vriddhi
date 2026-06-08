@@ -36,6 +36,13 @@ class InventoryMovement(Base):
         index=True
     )
 
+    branch_id = Column(
+        String,
+        nullable=True,
+        default="main",
+        index=True
+    )
+
     product_id = Column(
         String,
         ForeignKey("products.id"),
@@ -77,6 +84,26 @@ class InventoryMovement(Base):
         String,
         ForeignKey("users.id"),
         nullable=False
+    )
+
+    created_by_staff_id = Column(
+        String,
+        nullable=True,
+        index=True
+    )
+
+    source_app = Column(
+        String,
+        nullable=False,
+        default="admin_app",
+        index=True
+    )
+
+    sync_status = Column(
+        String,
+        nullable=False,
+        default="synced",
+        index=True
     )
 
     created_at = Column(

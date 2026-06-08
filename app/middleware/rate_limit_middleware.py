@@ -4,17 +4,24 @@ from collections import defaultdict
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from core.config import settings
+
 
 # Simple in-memory rate limiter.
 # For multi-worker production deployments, replace with Redis-based limiting.
 _request_log: dict[str, list[float]] = defaultdict(list)
 
-RATE_LIMIT = 120  # max requests per window
-WINDOW_SECONDS = 60
+RATE_LIMIT = settings.RATE_LIMIT_REQUESTS
+WINDOW_SECONDS = settings.RATE_LIMIT_WINDOW_SECONDS
 
 
 async def rate_limit_middleware(request: Request, call_next):
-    client_ip = request.client.host if request.client else "unknown"
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    client_ip = (
+        forwarded_for.split(",")[0].strip()
+        or request.headers.get("cf-connecting-ip")
+        or (request.client.host if request.client else "unknown")
+    )
     current_time = time.time()
 
     # Prune timestamps outside the window
