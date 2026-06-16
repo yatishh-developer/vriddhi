@@ -54,6 +54,11 @@ class StaffProfile(Base, TimestampMixin):
     allowed_apps = Column(Text, nullable=False, default='["staff_billing_app"]')
     status = Column(String, nullable=False, default="active", index=True)
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    firebase_uid = Column(String, nullable=True, unique=True, index=True)
+    auth_provider = Column(String, nullable=True)
+    auth_email = Column(String, nullable=True, index=True)
+    auth_display_name = Column(String, nullable=True)
+    auth_phone_number = Column(String, nullable=True)
 
     created_by = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     created_by_staff_id = Column(String, nullable=True, index=True)

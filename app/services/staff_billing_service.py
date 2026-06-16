@@ -31,6 +31,8 @@ from models.transaction_model import Transaction
 from models.user_model import User
 from schemas.staff_billing_schema import RealtimeEventEnvelope
 from schemas.staff_billing_schema import StaffBillCreate
+from schemas.staff_billing_schema import StaffFirebaseInviteAcceptRequest
+from schemas.staff_billing_schema import StaffFirebaseLoginRequest
 from schemas.staff_billing_schema import StaffHeldBillCreate
 from schemas.staff_billing_schema import StaffInviteCreate
 from schemas.staff_billing_schema import StaffKotCreate
@@ -129,8 +131,16 @@ def default_staff_permissions(feature_flags: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def normalize_invite_code(invite_code: str) -> str:
+    raw = (invite_code or "").strip()
+    if raw.startswith("vabos-staff-invite://"):
+        raw = raw.rsplit("/", 1)[-1]
+    normalized = "".join(ch for ch in raw if ch.isdigit())
+    return normalized
+
+
 def hash_invite_code(invite_code: str) -> str:
-    normalized = "".join(invite_code.split())
+    normalized = normalize_invite_code(invite_code)
     return hashlib.sha256(
         f"{normalized}:{settings.JWT_SECRET}".encode("utf-8")
     ).hexdigest()
@@ -195,6 +205,63 @@ class StaffBillingService:
         )
 
     @staticmethod
+    def get_invite(db: Session, current_user: User, invite_id: str) -> StaffInvite:
+        StaffBillingService.expire_old_invites(db, current_user.business_id)
+        invite = (
+            db.query(StaffInvite)
+            .filter(
+                StaffInvite.id == invite_id,
+                StaffInvite.business_id == current_user.business_id,
+            )
+            .first()
+        )
+        if not invite:
+            raise HTTPException(status_code=404, detail="Staff invite not found")
+        return invite
+
+    @staticmethod
+    def update_invite(
+        db: Session,
+        current_user: User,
+        invite_id: str,
+        payload: Any,
+    ) -> StaffInvite:
+        invite = StaffBillingService.get_invite(db, current_user, invite_id)
+        if invite.status != "active":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot edit invite because it is {invite.status}",
+            )
+
+        if payload.staff_name is not None and payload.staff_name.strip():
+            invite.staff_name = payload.staff_name.strip()
+        if payload.staff_role is not None and payload.staff_role.strip():
+            invite.staff_role = payload.staff_role.strip()
+        if payload.branch_id is not None and payload.branch_id.strip():
+            invite.branch_id = payload.branch_id.strip()
+        if payload.permissions is not None:
+            feature_flags = safe_json_loads(invite.feature_flags_snapshot, {})
+            invite.permissions_json = safe_json_dumps(
+                {
+                    **default_staff_permissions(feature_flags),
+                    **payload.permissions,
+                }
+            )
+        if payload.allowed_apps is not None:
+            invite.allowed_apps = safe_json_dumps(payload.allowed_apps or [STAFF_SOURCE_APP])
+        if payload.expires_in_seconds is not None:
+            invite.expires_at = utc_now() + timedelta(
+                seconds=max(60, min(payload.expires_in_seconds, 86400))
+            )
+        if payload.max_uses is not None:
+            invite.max_uses = max(1, payload.max_uses)
+
+        invite.sync_status = "pending"
+        db.commit()
+        db.refresh(invite)
+        return invite
+
+    @staticmethod
     def revoke_invite(db: Session, current_user: User, invite_id: str) -> StaffInvite:
         invite = (
             db.query(StaffInvite)
@@ -211,6 +278,70 @@ class StaffBillingService:
         db.commit()
         db.refresh(invite)
         return invite
+
+    @staticmethod
+    def list_staff_profiles(db: Session, current_user: User) -> List[StaffProfile]:
+        return (
+            db.query(StaffProfile)
+            .filter(StaffProfile.business_id == current_user.business_id)
+            .order_by(StaffProfile.created_at.desc())
+            .limit(300)
+            .all()
+        )
+
+    @staticmethod
+    def get_staff_profile_admin(
+        db: Session,
+        current_user: User,
+        staff_id: str,
+    ) -> StaffProfile:
+        staff = (
+            db.query(StaffProfile)
+            .filter(
+                StaffProfile.id == staff_id,
+                StaffProfile.business_id == current_user.business_id,
+            )
+            .first()
+        )
+        if not staff:
+            raise HTTPException(status_code=404, detail="Staff account not found")
+        return staff
+
+    @staticmethod
+    def update_staff_profile_admin(
+        db: Session,
+        current_user: User,
+        staff_id: str,
+        payload: Any,
+    ) -> StaffProfile:
+        staff = StaffBillingService.get_staff_profile_admin(db, current_user, staff_id)
+
+        if payload.staff_name is not None and payload.staff_name.strip():
+            staff.staff_name = payload.staff_name.strip()
+        if payload.role is not None and payload.role.strip():
+            staff.role = payload.role.strip()
+        if payload.branch_id is not None and payload.branch_id.strip():
+            staff.branch_id = payload.branch_id.strip()
+        if payload.permissions is not None:
+            feature_flags = StaffBillingService._feature_flags_for_staff(db, staff)
+            staff.permissions_json = safe_json_dumps(
+                {
+                    **default_staff_permissions(feature_flags),
+                    **payload.permissions,
+                }
+            )
+        if payload.allowed_apps is not None:
+            staff.allowed_apps = safe_json_dumps(payload.allowed_apps or [STAFF_SOURCE_APP])
+        if payload.status is not None:
+            status = payload.status.strip().lower()
+            if status not in {"active", "disabled", "revoked"}:
+                raise HTTPException(status_code=400, detail="Invalid staff status")
+            staff.status = status
+
+        staff.sync_status = "pending"
+        db.commit()
+        db.refresh(staff)
+        return staff
 
     @staticmethod
     def expire_old_invites(db: Session, business_id: Optional[str] = None) -> int:
@@ -234,8 +365,11 @@ class StaffBillingService:
         invite_code: str,
         device_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        normalized_code = normalize_invite_code(invite_code)
+        if len(normalized_code) not in {6, 8}:
+            raise HTTPException(status_code=400, detail="Invite code must be 6 or 8 digits")
         StaffBillingService.expire_old_invites(db)
-        invite_hash = hash_invite_code(invite_code)
+        invite_hash = hash_invite_code(normalized_code)
         invite = db.query(StaffInvite).filter(
             StaffInvite.invite_code_hash == invite_hash,
         ).first()
@@ -278,6 +412,8 @@ class StaffBillingService:
             allowed_apps=safe_json_dumps(allowed_apps),
             status="active",
             last_seen_at=utc_now(),
+            firebase_uid=device_id,
+            auth_provider="firebase" if device_id else None,
             created_by=invite.created_by,
             created_by_staff_id=invite.created_by_staff_id,
             source_app=ADMIN_SOURCE_APP,
@@ -294,29 +430,102 @@ class StaffBillingService:
         db.refresh(staff)
         db.refresh(invite)
 
-        access_token = create_access_token(
-            {
-                "sub": staff.id,
-                "role": "staff",
-                "token_type": "access",
-                "business_id": staff.business_id,
-                "branch_id": staff.branch_id,
-                "staff_id": staff.id,
-                "device_id": device_id,
-            }
-        )
-        refresh_token = create_access_token(
-            {
-                "sub": staff.id,
-                "role": "staff",
-                "token_type": "refresh",
-                "business_id": staff.business_id,
-                "branch_id": staff.branch_id,
-                "staff_id": staff.id,
-                "device_id": device_id,
-            }
+        return StaffBillingService._auth_payload_for_staff(
+            db,
+            staff,
+            device_id=device_id,
         )
 
+    @staticmethod
+    def firebase_login(
+        db: Session,
+        payload: StaffFirebaseLoginRequest,
+    ) -> Dict[str, Any]:
+        firebase_uid = StaffBillingService._firebase_uid_from_payload(payload)
+        staff = (
+            db.query(StaffProfile)
+            .filter(StaffProfile.firebase_uid == firebase_uid)
+            .first()
+        )
+        if not staff or staff.status != "active":
+            return {
+                "status": "invite_required",
+                "requiresInvite": True,
+                "requires_invite": True,
+            }
+
+        StaffBillingService._apply_firebase_identity(staff, payload)
+        staff.last_seen_at = utc_now()
+        db.commit()
+        db.refresh(staff)
+        return StaffBillingService._auth_payload_for_staff(
+            db,
+            staff,
+            device_id=firebase_uid,
+        )
+
+    @staticmethod
+    def accept_firebase_invite(
+        db: Session,
+        payload: StaffFirebaseInviteAcceptRequest,
+    ) -> Dict[str, Any]:
+        firebase_uid = StaffBillingService._firebase_uid_from_payload(payload)
+        existing = (
+            db.query(StaffProfile)
+            .filter(StaffProfile.firebase_uid == firebase_uid)
+            .first()
+        )
+        if existing and existing.status == "active":
+            StaffBillingService._apply_firebase_identity(existing, payload)
+            existing.last_seen_at = utc_now()
+            db.commit()
+            db.refresh(existing)
+            return StaffBillingService._auth_payload_for_staff(
+                db,
+                existing,
+                device_id=firebase_uid,
+            )
+
+        response = StaffBillingService.verify_invite_code(
+            db,
+            payload.invite_code,
+            firebase_uid,
+        )
+        staff = (
+            db.query(StaffProfile)
+            .filter(StaffProfile.id == response["staff_id"])
+            .first()
+        )
+        if staff:
+            StaffBillingService._apply_firebase_identity(staff, payload)
+            staff.last_seen_at = utc_now()
+            db.commit()
+        return response
+
+    @staticmethod
+    def _auth_payload_for_staff(
+        db: Session,
+        staff: StaffProfile,
+        device_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        business = db.query(Business).filter(Business.id == staff.business_id).first()
+        if not business:
+            raise HTTPException(status_code=404, detail="Business not found")
+        feature_flags = feature_flags_for_business_type(business.business_type)
+        permissions = {
+            **default_staff_permissions(feature_flags),
+            **safe_json_loads(staff.permissions_json, {}),
+        }
+        token_payload = {
+            "sub": staff.id,
+            "role": "staff",
+            "business_id": staff.business_id,
+            "branch_id": staff.branch_id,
+            "staff_id": staff.id,
+            "device_id": device_id,
+        }
+        access_token = create_access_token({**token_payload, "token_type": "access"})
+        refresh_token = create_access_token({**token_payload, "token_type": "refresh"})
         return {
             "staff_id": staff.id,
             "staff_name": staff.staff_name,
@@ -327,10 +536,54 @@ class StaffBillingService:
             "role": staff.role,
             "permissions": permissions,
             "feature_flags": feature_flags,
+            "business_address": business.address or "",
+            "business_phone": business.phone or "",
+            "upi_id": business.upi_id or "",
+            "businessProfile": {
+                "business_id": business.id,
+                "business_name": business.name,
+                "business_type": business.business_type,
+                "address": business.address or "",
+                "phone": business.phone or "",
+                "upi_id": business.upi_id or "",
+                "branch_id": staff.branch_id,
+            },
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer",
         }
+
+    @staticmethod
+    def _firebase_uid_from_payload(payload: StaffFirebaseLoginRequest) -> str:
+        uid = (payload.uid or "").strip()
+        if not uid and payload.id_token:
+            try:
+                claims = jwt.get_unverified_claims(payload.id_token)
+                uid = (
+                    str(claims.get("user_id") or claims.get("sub") or "")
+                    if isinstance(claims, dict)
+                    else ""
+                )
+            except JWTError:
+                uid = ""
+        if not uid:
+            raise HTTPException(status_code=401, detail="Firebase identity is missing")
+        return uid
+
+    @staticmethod
+    def _apply_firebase_identity(
+        staff: StaffProfile,
+        payload: StaffFirebaseLoginRequest,
+    ) -> None:
+        firebase_uid = StaffBillingService._firebase_uid_from_payload(payload)
+        staff.firebase_uid = firebase_uid
+        staff.auth_provider = payload.provider or staff.auth_provider or "firebase"
+        if payload.email:
+            staff.auth_email = payload.email
+        if payload.display_name:
+            staff.auth_display_name = payload.display_name
+        if payload.phone_number:
+            staff.auth_phone_number = payload.phone_number
 
     @staticmethod
     def refresh_staff_token(db: Session, refresh_token: str) -> str:
