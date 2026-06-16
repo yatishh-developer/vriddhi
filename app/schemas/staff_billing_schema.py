@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from pydantic import AliasChoices
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
@@ -17,6 +18,16 @@ class StaffInviteCreate(BaseModel):
     allowed_apps: List[str] = Field(default_factory=lambda: ["staff_billing_app"])
 
 
+class StaffInviteUpdate(BaseModel):
+    staff_name: Optional[str] = None
+    staff_role: Optional[str] = None
+    branch_id: Optional[str] = None
+    permissions: Optional[Dict[str, Any]] = None
+    allowed_apps: Optional[List[str]] = None
+    expires_in_seconds: Optional[int] = None
+    max_uses: Optional[int] = None
+
+
 class StaffInviteResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -28,15 +39,75 @@ class StaffInviteResponse(BaseModel):
     staff_name: str
     staff_role: str
     invite_code: Optional[str] = None
+    code_length: int = 6
+    allowed_apps: List[str] = Field(default_factory=lambda: ["staff_billing_app"])
+    permissions: Dict[str, Any] = Field(default_factory=dict)
+    feature_flags: Dict[str, Any] = Field(default_factory=dict)
     expires_at: datetime
     max_uses: int
     used_count: int
     status: str
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class StaffProfileAdminResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    business_id: str
+    branch_id: str
+    invite_id: Optional[str] = None
+    staff_name: str
+    role: str
+    permissions: Dict[str, Any] = Field(default_factory=dict)
+    allowed_apps: List[str] = Field(default_factory=lambda: ["staff_billing_app"])
+    status: str
+    last_seen_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class StaffProfileAdminUpdate(BaseModel):
+    staff_name: Optional[str] = None
+    role: Optional[str] = None
+    branch_id: Optional[str] = None
+    permissions: Optional[Dict[str, Any]] = None
+    allowed_apps: Optional[List[str]] = None
+    status: Optional[str] = None
 
 
 class StaffInviteVerifyRequest(BaseModel):
     invite_code: str
     device_id: Optional[str] = None
+
+
+class StaffFirebaseLoginRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    uid: Optional[str] = None
+    id_token: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("id_token", "idToken"),
+    )
+    email: Optional[str] = None
+    display_name: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("display_name", "displayName"),
+    )
+    phone_number: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("phone_number", "phoneNumber"),
+    )
+    provider: Optional[str] = None
+
+
+class StaffFirebaseInviteAcceptRequest(StaffFirebaseLoginRequest):
+    invite_code: str = Field(
+        validation_alias=AliasChoices("invite_code", "inviteCode"),
+    )
 
 
 class StaffAuthResponse(BaseModel):

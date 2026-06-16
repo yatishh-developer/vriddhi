@@ -24,15 +24,20 @@ from schemas.staff_billing_schema import RealtimeEventEnvelope
 from schemas.staff_billing_schema import StaffAuthResponse
 from schemas.staff_billing_schema import StaffBillCreate
 from schemas.staff_billing_schema import StaffBillResponse
+from schemas.staff_billing_schema import StaffFirebaseInviteAcceptRequest
+from schemas.staff_billing_schema import StaffFirebaseLoginRequest
 from schemas.staff_billing_schema import StaffHeldBillCreate
 from schemas.staff_billing_schema import StaffHeldBillResponse
 from schemas.staff_billing_schema import StaffInviteCreate
 from schemas.staff_billing_schema import StaffInviteResponse
+from schemas.staff_billing_schema import StaffInviteUpdate
 from schemas.staff_billing_schema import StaffInviteVerifyRequest
 from schemas.staff_billing_schema import StaffKotCreate
 from schemas.staff_billing_schema import StaffKotResponse
 from schemas.staff_billing_schema import StaffKotUpdate
 from schemas.staff_billing_schema import StaffMeResponse
+from schemas.staff_billing_schema import StaffProfileAdminResponse
+from schemas.staff_billing_schema import StaffProfileAdminUpdate
 from schemas.staff_billing_schema import StaffProcessClaimRequest
 from schemas.staff_billing_schema import StaffProcessHeartbeatRequest
 from schemas.staff_billing_schema import StaffProcessLockResponse
@@ -44,6 +49,7 @@ from schemas.staff_billing_schema import StaffSyncPushResponse
 from schemas.staff_billing_schema import StaffTokenResponse
 from services.staff_billing_service import STAFF_SOURCE_APP
 from services.staff_billing_service import StaffBillingService
+from services.staff_billing_service import safe_json_loads
 from services.staff_billing_service import staff_realtime_manager
 
 
@@ -59,6 +65,9 @@ def get_current_staff(
 
 
 def _invite_response(invite, invite_code=None):
+    permissions = safe_json_loads(invite.permissions_json, {})
+    feature_flags = safe_json_loads(invite.feature_flags_snapshot, {})
+    allowed_apps = safe_json_loads(invite.allowed_apps, [STAFF_SOURCE_APP])
     return {
         "id": invite.id,
         "business_id": invite.business_id,
@@ -68,10 +77,35 @@ def _invite_response(invite, invite_code=None):
         "staff_name": invite.staff_name,
         "staff_role": invite.staff_role,
         "invite_code": invite_code,
+        "code_length": invite.code_length,
+        "allowed_apps": allowed_apps,
+        "permissions": permissions,
+        "feature_flags": feature_flags,
         "expires_at": invite.expires_at,
         "max_uses": invite.max_uses,
         "used_count": invite.used_count,
         "status": invite.status,
+        "created_by": invite.created_by,
+        "created_at": invite.created_at,
+        "updated_at": invite.updated_at,
+    }
+
+
+def _staff_profile_admin_response(staff):
+    return {
+        "id": staff.id,
+        "business_id": staff.business_id,
+        "branch_id": staff.branch_id,
+        "invite_id": staff.invite_id,
+        "staff_name": staff.staff_name,
+        "role": staff.role,
+        "permissions": safe_json_loads(staff.permissions_json, {}),
+        "allowed_apps": safe_json_loads(staff.allowed_apps, [STAFF_SOURCE_APP]),
+        "status": staff.status,
+        "last_seen_at": staff.last_seen_at,
+        "created_by": staff.created_by,
+        "created_at": staff.created_at,
+        "updated_at": staff.updated_at,
     }
 
 
@@ -93,6 +127,27 @@ def list_staff_invites(
     return [_invite_response(invite) for invite in StaffBillingService.list_invites(db, current_user)]
 
 
+@router.get("/staff/admin/invites/{invite_id}", response_model=StaffInviteResponse)
+def get_staff_invite(
+    invite_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    invite = StaffBillingService.get_invite(db, current_user, invite_id)
+    return _invite_response(invite)
+
+
+@router.patch("/staff/admin/invites/{invite_id}", response_model=StaffInviteResponse)
+def update_staff_invite(
+    invite_id: str,
+    payload: StaffInviteUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    invite = StaffBillingService.update_invite(db, current_user, invite_id, payload)
+    return _invite_response(invite)
+
+
 @router.post("/staff/admin/invites/{invite_id}/revoke", response_model=StaffInviteResponse)
 def revoke_staff_invite(
     invite_id: str,
@@ -101,6 +156,43 @@ def revoke_staff_invite(
 ):
     invite = StaffBillingService.revoke_invite(db, current_user, invite_id)
     return _invite_response(invite)
+
+
+@router.get("/staff/admin/staff", response_model=List[StaffProfileAdminResponse])
+def list_admin_staff_accounts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return [
+        _staff_profile_admin_response(staff)
+        for staff in StaffBillingService.list_staff_profiles(db, current_user)
+    ]
+
+
+@router.get("/staff/admin/staff/{staff_id}", response_model=StaffProfileAdminResponse)
+def get_admin_staff_account(
+    staff_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    staff = StaffBillingService.get_staff_profile_admin(db, current_user, staff_id)
+    return _staff_profile_admin_response(staff)
+
+
+@router.patch("/staff/admin/staff/{staff_id}", response_model=StaffProfileAdminResponse)
+def update_admin_staff_account(
+    staff_id: str,
+    payload: StaffProfileAdminUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    staff = StaffBillingService.update_staff_profile_admin(
+        db,
+        current_user,
+        staff_id,
+        payload,
+    )
+    return _staff_profile_admin_response(staff)
 
 
 @router.get("/staff/admin/bills", response_model=List[StaffBillResponse])
@@ -194,6 +286,46 @@ def admin_staff_events(
 
 @router.post("/staff/auth/verify-invite-code", response_model=StaffAuthResponse)
 def verify_staff_invite_code(
+    payload: StaffInviteVerifyRequest,
+    db: Session = Depends(get_db),
+):
+    return StaffBillingService.verify_invite_code(
+        db,
+        payload.invite_code,
+        payload.device_id,
+    )
+
+
+@router.post("/staff/auth/verify", response_model=StaffAuthResponse)
+def verify_staff_invite_code_alias(
+    payload: StaffInviteVerifyRequest,
+    db: Session = Depends(get_db),
+):
+    return StaffBillingService.verify_invite_code(
+        db,
+        payload.invite_code,
+        payload.device_id,
+    )
+
+
+@router.post("/staff/auth/firebase-login")
+def firebase_staff_login(
+    payload: StaffFirebaseLoginRequest,
+    db: Session = Depends(get_db),
+):
+    return StaffBillingService.firebase_login(db, payload)
+
+
+@router.post("/staff/auth/accept-invite", response_model=StaffAuthResponse)
+def accept_staff_invite_after_firebase_auth(
+    payload: StaffFirebaseInviteAcceptRequest,
+    db: Session = Depends(get_db),
+):
+    return StaffBillingService.accept_firebase_invite(db, payload)
+
+
+@router.post("/auth/staff/verify-invite-code", response_model=StaffAuthResponse)
+def verify_staff_invite_code_legacy_alias(
     payload: StaffInviteVerifyRequest,
     db: Session = Depends(get_db),
 ):

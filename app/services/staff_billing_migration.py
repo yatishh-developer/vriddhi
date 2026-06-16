@@ -50,6 +50,16 @@ def run_staff_billing_migrations(engine) -> None:
         ),
         "CREATE INDEX IF NOT EXISTS ix_inventory_movements_source_app ON inventory_movements (source_app)",
         "CREATE INDEX IF NOT EXISTS ix_inventory_movements_sync_status ON inventory_movements (sync_status)",
+        "ALTER TABLE staff_profiles ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR NULL",
+        "ALTER TABLE staff_profiles ADD COLUMN IF NOT EXISTS auth_provider VARCHAR NULL",
+        "ALTER TABLE staff_profiles ADD COLUMN IF NOT EXISTS auth_email VARCHAR NULL",
+        "ALTER TABLE staff_profiles ADD COLUMN IF NOT EXISTS auth_display_name VARCHAR NULL",
+        "ALTER TABLE staff_profiles ADD COLUMN IF NOT EXISTS auth_phone_number VARCHAR NULL",
+        (
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_staff_profiles_firebase_uid "
+            "ON staff_profiles (firebase_uid) WHERE firebase_uid IS NOT NULL"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_staff_profiles_auth_email ON staff_profiles (auth_email)",
     ]
 
     with engine.begin() as connection:
