@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from auth.security import create_access_token
 from core.config import settings
 from models.business_model import Business
+from models.customer_model import Customer
 from models.inventory_movement_model import InventoryMovement
 from models.inventory_movement_model import InventoryMovementType
 from models.product_model import Product
@@ -42,6 +43,8 @@ from schemas.staff_billing_schema import StaffProcessClaimRequest
 
 STAFF_SOURCE_APP = "staff_billing_app"
 ADMIN_SOURCE_APP = "admin_app"
+KOT_STATUSES = {"pending", "preparing", "ready", "served", "converted", "cancelled"}
+HELD_BILL_STATUSES = {"held", "resumed", "completed", "cancelled"}
 
 
 def utc_now() -> datetime:
@@ -118,6 +121,8 @@ def default_staff_permissions(feature_flags: Dict[str, Any]) -> Dict[str, Any]:
         "create_bill": True,
         "create_kot": bool(feature_flags.get("kot")),
         "convert_kot_to_bill": bool(feature_flags.get("kot")),
+        "cancel_kot": False,
+        "cancel_bill": False,
         "hold_bill": bool(feature_flags.get("hold_bill")),
         "resume_held_bill": bool(feature_flags.get("resume_held_bill")),
         "collect_payment": True,
@@ -508,6 +513,7 @@ class StaffBillingService:
         staff: StaffProfile,
         device_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        StaffBillingService._ensure_staff_billing_allowed(staff)
         business = db.query(Business).filter(Business.id == staff.business_id).first()
         if not business:
             raise HTTPException(status_code=404, detail="Business not found")
@@ -636,10 +642,12 @@ class StaffBillingService:
         staff = db.query(StaffProfile).filter(StaffProfile.id == staff_id).first()
         if not staff or staff.status != "active":
             raise credentials_exception
+        StaffBillingService._ensure_staff_billing_allowed(staff)
         return staff
 
     @staticmethod
     def staff_profile_payload(db: Session, staff: StaffProfile) -> Dict[str, Any]:
+        StaffBillingService._ensure_staff_billing_allowed(staff)
         business = db.query(Business).filter(Business.id == staff.business_id).first()
         if not business:
             raise HTTPException(status_code=404, detail="Business not found")
@@ -688,6 +696,8 @@ class StaffBillingService:
 
     @staticmethod
     def create_bill(db: Session, staff: StaffProfile, payload: StaffBillCreate) -> Transaction:
+        StaffBillingService._ensure_staff_billing_allowed(staff)
+        staff_branch_id = StaffBillingService._normalize_branch_id(staff.branch_id)
         permissions = StaffBillingService._permissions_for_staff(db, staff)
         if not permissions.get("create_bill", True):
             raise HTTPException(status_code=403, detail="Staff cannot create bills")
@@ -712,6 +722,8 @@ class StaffBillingService:
                 db.query(Transaction)
                 .filter(
                     Transaction.business_id == staff.business_id,
+                    Transaction.branch_id == staff_branch_id,
+                    Transaction.source_app == STAFF_SOURCE_APP,
                     Transaction.idempotency_key == payload.idempotency_key,
                 )
                 .first()
@@ -729,13 +741,18 @@ class StaffBillingService:
             .first()
         )
         if existing:
+            if StaffBillingService._normalize_branch_id(existing.branch_id) != staff_branch_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Transaction id belongs to a different branch",
+                )
             return existing
 
         items_json = StaffBillingService._serialize_items(payload.items_json, payload.items)
         transaction = Transaction(
             id=transaction_id,
             business_id=staff.business_id,
-            branch_id=staff.branch_id,
+            branch_id=staff_branch_id,
             customer_id=payload.customer_id,
             flow="Staff",
             bill_no=payload.bill_no,
@@ -774,6 +791,7 @@ class StaffBillingService:
         db.add(transaction)
         StaffBillingService._apply_stock_movements(db, staff, transaction, payload.items)
         StaffBillingService._create_staff_payment(db, staff, transaction, payload)
+        StaffBillingService._apply_customer_credit(db, staff, payload)
 
         db.commit()
         db.refresh(transaction)
@@ -781,11 +799,12 @@ class StaffBillingService:
 
     @staticmethod
     def list_bills(db: Session, staff: StaffProfile) -> List[Transaction]:
+        staff_branch_id = StaffBillingService._normalize_branch_id(staff.branch_id)
         return (
             db.query(Transaction)
             .filter(
                 Transaction.business_id == staff.business_id,
-                Transaction.branch_id == staff.branch_id,
+                Transaction.branch_id == staff_branch_id,
                 Transaction.source_app == STAFF_SOURCE_APP,
             )
             .order_by(Transaction.created_at.desc())
@@ -795,6 +814,8 @@ class StaffBillingService:
 
     @staticmethod
     def create_kot(db: Session, staff: StaffProfile, payload: StaffKotCreate) -> StaffKot:
+        StaffBillingService._ensure_staff_billing_allowed(staff)
+        staff_branch_id = StaffBillingService._normalize_branch_id(staff.branch_id)
         feature_flags = StaffBillingService._feature_flags_for_staff(db, staff)
         permissions = StaffBillingService._permissions_for_staff(db, staff)
         if not feature_flags.get("kot") or not permissions.get("create_kot"):
@@ -805,6 +826,7 @@ class StaffBillingService:
                 db.query(StaffKot)
                 .filter(
                     StaffKot.business_id == staff.business_id,
+                    StaffKot.branch_id == staff_branch_id,
                     StaffKot.idempotency_key == payload.idempotency_key,
                 )
                 .first()
@@ -815,7 +837,7 @@ class StaffBillingService:
         kot = StaffKot(
             id=payload.id or str(uuid.uuid4()),
             business_id=staff.business_id,
-            branch_id=staff.branch_id,
+            branch_id=staff_branch_id,
             staff_id=staff.id,
             staff_name=staff.staff_name,
             status="pending",
@@ -838,11 +860,12 @@ class StaffBillingService:
 
     @staticmethod
     def list_kots(db: Session, staff: StaffProfile) -> List[StaffKot]:
+        staff_branch_id = StaffBillingService._normalize_branch_id(staff.branch_id)
         return (
             db.query(StaffKot)
             .filter(
                 StaffKot.business_id == staff.business_id,
-                StaffKot.branch_id == staff.branch_id,
+                StaffKot.branch_id == staff_branch_id,
             )
             .order_by(StaffKot.created_at.desc())
             .limit(200)
@@ -856,7 +879,14 @@ class StaffBillingService:
             raise HTTPException(status_code=409, detail="Completed KOT cannot be edited")
 
         if payload.status is not None:
-            kot.status = payload.status
+            status = payload.status.strip().lower()
+            if status not in KOT_STATUSES:
+                raise HTTPException(status_code=400, detail="Invalid KOT status")
+            if status == "cancelled":
+                permissions = StaffBillingService._permissions_for_staff(db, staff)
+                if not permissions.get("cancel_kot"):
+                    raise HTTPException(status_code=403, detail="Staff cannot cancel KOT")
+            kot.status = status
         if payload.order_type is not None:
             kot.order_type = payload.order_type
         if payload.table_token is not None:
@@ -930,6 +960,8 @@ class StaffBillingService:
         staff: StaffProfile,
         payload: StaffHeldBillCreate,
     ) -> StaffHeldBill:
+        StaffBillingService._ensure_staff_billing_allowed(staff)
+        staff_branch_id = StaffBillingService._normalize_branch_id(staff.branch_id)
         feature_flags = StaffBillingService._feature_flags_for_staff(db, staff)
         permissions = StaffBillingService._permissions_for_staff(db, staff)
         if not feature_flags.get("hold_bill") or not permissions.get("hold_bill"):
@@ -940,6 +972,7 @@ class StaffBillingService:
                 db.query(StaffHeldBill)
                 .filter(
                     StaffHeldBill.business_id == staff.business_id,
+                    StaffHeldBill.branch_id == staff_branch_id,
                     StaffHeldBill.idempotency_key == payload.idempotency_key,
                 )
                 .first()
@@ -950,7 +983,7 @@ class StaffBillingService:
         held_bill = StaffHeldBill(
             id=payload.id or str(uuid.uuid4()),
             business_id=staff.business_id,
-            branch_id=staff.branch_id,
+            branch_id=staff_branch_id,
             staff_id=staff.id,
             staff_name=staff.staff_name,
             status="held",
@@ -973,11 +1006,12 @@ class StaffBillingService:
 
     @staticmethod
     def list_held_bills(db: Session, staff: StaffProfile) -> List[StaffHeldBill]:
+        staff_branch_id = StaffBillingService._normalize_branch_id(staff.branch_id)
         return (
             db.query(StaffHeldBill)
             .filter(
                 StaffHeldBill.business_id == staff.business_id,
-                StaffHeldBill.branch_id == staff.branch_id,
+                StaffHeldBill.branch_id == staff_branch_id,
             )
             .order_by(StaffHeldBill.created_at.desc())
             .limit(200)
@@ -986,12 +1020,15 @@ class StaffBillingService:
 
     @staticmethod
     def resume_held_bill(db: Session, staff: StaffProfile, held_bill_id: str) -> StaffHeldBill:
+        permissions = StaffBillingService._permissions_for_staff(db, staff)
+        if not permissions.get("resume_held_bill"):
+            raise HTTPException(status_code=403, detail="Staff cannot resume held bills")
         held_bill = (
             db.query(StaffHeldBill)
             .filter(
                 StaffHeldBill.id == held_bill_id,
                 StaffHeldBill.business_id == staff.business_id,
-                StaffHeldBill.branch_id == staff.branch_id,
+                StaffHeldBill.branch_id == StaffBillingService._normalize_branch_id(staff.branch_id),
             )
             .first()
         )
@@ -1011,6 +1048,7 @@ class StaffBillingService:
         staff: StaffProfile,
         payload: StaffProcessClaimRequest,
     ) -> StaffProcessLock:
+        staff_branch_id = StaffBillingService._normalize_branch_id(staff.branch_id)
         process_id = payload.process_id or f"{payload.process_type}:{payload.entity_id}"
         now = utc_now()
         expires_at = now + timedelta(seconds=max(30, payload.ttl_seconds))
@@ -1040,7 +1078,7 @@ class StaffBillingService:
 
             lock.process_type = payload.process_type
             lock.entity_id = payload.entity_id
-            lock.branch_id = staff.branch_id
+            lock.branch_id = staff_branch_id
             lock.handled_by_staff_id = staff.id
             lock.handled_by_staff_name = staff.staff_name
             lock.status = "active"
@@ -1055,7 +1093,7 @@ class StaffBillingService:
                 process_type=payload.process_type,
                 entity_id=payload.entity_id,
                 business_id=staff.business_id,
-                branch_id=staff.branch_id,
+                branch_id=staff_branch_id,
                 handled_by_staff_id=staff.id,
                 handled_by_staff_name=staff.staff_name,
                 status="active",
@@ -1112,6 +1150,7 @@ class StaffBillingService:
     @staticmethod
     def list_active_processes(db: Session, staff: StaffProfile) -> List[StaffProcessLock]:
         now = utc_now()
+        staff_branch_id = StaffBillingService._normalize_branch_id(staff.branch_id)
         expired = (
             db.query(StaffProcessLock)
             .filter(
@@ -1131,7 +1170,7 @@ class StaffBillingService:
             db.query(StaffProcessLock)
             .filter(
                 StaffProcessLock.business_id == staff.business_id,
-                StaffProcessLock.branch_id == staff.branch_id,
+                StaffProcessLock.branch_id == staff_branch_id,
                 StaffProcessLock.status.in_(["active", "released", "expired"]),
             )
             .order_by(StaffProcessLock.updated_at.desc())
@@ -1145,8 +1184,14 @@ class StaffBillingService:
         staff: StaffProfile,
         event: RealtimeEventEnvelope,
     ) -> bool:
+        staff_branch_id = StaffBillingService._normalize_branch_id(staff.branch_id)
         if event.business_id and event.business_id != staff.business_id:
             raise HTTPException(status_code=403, detail="Event business does not match staff")
+        if (
+            event.branch_id
+            and StaffBillingService._normalize_branch_id(event.branch_id) != staff_branch_id
+        ):
+            raise HTTPException(status_code=403, detail="Event branch does not match staff")
         if event.staff_id and event.staff_id != staff.id:
             raise HTTPException(status_code=403, detail="Event staff does not match token")
 
@@ -1162,7 +1207,7 @@ class StaffBillingService:
             entity_type=event.entity_type,
             entity_id=event.entity_id,
             business_id=staff.business_id,
-            branch_id=event.branch_id or staff.branch_id,
+            branch_id=staff_branch_id,
             staff_id=staff.id,
             device_id=event.device_id,
             occurred_at=event.occurred_at or utc_now(),
@@ -1179,6 +1224,7 @@ class StaffBillingService:
 
     @staticmethod
     def pull_sync_payload(db: Session, staff: StaffProfile) -> Dict[str, Any]:
+        staff_branch_id = StaffBillingService._normalize_branch_id(staff.branch_id)
         products = [StaffBillingService._sa_to_dict(product) for product in StaffBillingService.list_products(db, staff)]
         kots = [StaffBillingService._sa_to_dict(kot) for kot in StaffBillingService.list_kots(db, staff)]
         held = [StaffBillingService._sa_to_dict(row) for row in StaffBillingService.list_held_bills(db, staff)]
@@ -1189,7 +1235,7 @@ class StaffBillingService:
                 db.query(StaffRealtimeEvent)
                 .filter(
                     StaffRealtimeEvent.business_id == staff.business_id,
-                    StaffRealtimeEvent.branch_id == staff.branch_id,
+                    StaffRealtimeEvent.branch_id == staff_branch_id,
                 )
                 .order_by(StaffRealtimeEvent.created_at.desc())
                 .limit(200)
@@ -1254,6 +1300,20 @@ class StaffBillingService:
         raise HTTPException(status_code=500, detail="Could not generate unique invite code")
 
     @staticmethod
+    def _ensure_staff_billing_allowed(staff: StaffProfile) -> None:
+        allowed_apps = safe_json_loads(staff.allowed_apps, [STAFF_SOURCE_APP])
+        if STAFF_SOURCE_APP not in allowed_apps:
+            raise HTTPException(
+                status_code=403,
+                detail="Staff billing app access is not enabled for this staff",
+            )
+
+    @staticmethod
+    def _normalize_branch_id(branch_id: Optional[str]) -> str:
+        branch = (branch_id or "main").strip()
+        return branch or "main"
+
+    @staticmethod
     def _feature_flags_for_staff(db: Session, staff: StaffProfile) -> Dict[str, Any]:
         business = db.query(Business).filter(Business.id == staff.business_id).first()
         return feature_flags_for_business_type(business.business_type if business else None)
@@ -1271,12 +1331,12 @@ class StaffBillingService:
         if not payload.items and not payload.items_json:
             raise HTTPException(status_code=400, detail="Cart is empty")
         amounts = [
-            payload.cash_amount,
-            payload.upi_amount,
-            payload.card_amount,
-            payload.other_paid_amount,
-            payload.credit_amount,
-            payload.discount,
+            payload.cash_amount or 0.0,
+            payload.upi_amount or 0.0,
+            payload.card_amount or 0.0,
+            payload.other_paid_amount or 0.0,
+            payload.credit_amount or 0.0,
+            payload.discount or 0.0,
         ]
         if any(amount < 0 for amount in amounts):
             raise HTTPException(status_code=400, detail="Paid amount cannot be negative")
@@ -1285,7 +1345,7 @@ class StaffBillingService:
         if payload.credit_amount > 0:
             if not permissions.get("credit_sale"):
                 raise HTTPException(status_code=403, detail="Credit sale is not enabled for this staff")
-            if not payload.customer_id and not payload.customer_name:
+            if not payload.customer_id:
                 raise HTTPException(status_code=400, detail="Credit payment requires customer")
 
         payable_total = payload.total or (
@@ -1346,6 +1406,7 @@ class StaffBillingService:
                     Product.business_id == staff.business_id,
                     Product.is_deleted == False,
                 )
+                .with_for_update()
                 .first()
             )
             if not product:
@@ -1376,7 +1437,7 @@ class StaffBillingService:
             db.add(
                 InventoryMovement(
                     business_id=staff.business_id,
-                    branch_id=staff.branch_id,
+                    branch_id=StaffBillingService._normalize_branch_id(staff.branch_id),
                     product_id=product.id,
                     movement_type=InventoryMovementType.SALE,
                     quantity=quantity,
@@ -1407,7 +1468,7 @@ class StaffBillingService:
         payment = StaffPayment(
             id=str(uuid.uuid4()),
             business_id=staff.business_id,
-            branch_id=staff.branch_id,
+            branch_id=StaffBillingService._normalize_branch_id(staff.branch_id),
             staff_id=staff.id,
             staff_name=staff.staff_name,
             bill_transaction_id=transaction.id,
@@ -1436,13 +1497,36 @@ class StaffBillingService:
         db.add(payment)
 
     @staticmethod
+    def _apply_customer_credit(
+        db: Session,
+        staff: StaffProfile,
+        payload: StaffBillCreate,
+    ) -> None:
+        credit_amount = payload.credit_amount or 0.0
+        if credit_amount <= 0:
+            return
+        customer = (
+            db.query(Customer)
+            .filter(
+                Customer.id == payload.customer_id,
+                Customer.business_id == staff.business_id,
+                Customer.is_deleted == False,
+            )
+            .with_for_update()
+            .first()
+        )
+        if not customer:
+            raise HTTPException(status_code=404, detail="Credit customer not found")
+        customer.balance_remaining = (customer.balance_remaining or 0.0) + credit_amount
+
+    @staticmethod
     def _get_kot(db: Session, staff: StaffProfile, kot_id: str) -> StaffKot:
         kot = (
             db.query(StaffKot)
             .filter(
                 StaffKot.id == kot_id,
                 StaffKot.business_id == staff.business_id,
-                StaffKot.branch_id == staff.branch_id,
+                StaffKot.branch_id == StaffBillingService._normalize_branch_id(staff.branch_id),
             )
             .first()
         )
@@ -1457,7 +1541,7 @@ class StaffBillingService:
             .filter(
                 StaffProcessLock.process_id == process_id,
                 StaffProcessLock.business_id == staff.business_id,
-                StaffProcessLock.branch_id == staff.branch_id,
+                StaffProcessLock.branch_id == StaffBillingService._normalize_branch_id(staff.branch_id),
             )
             .first()
         )

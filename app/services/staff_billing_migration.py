@@ -22,6 +22,14 @@ def run_staff_billing_migrations(engine) -> None:
         return
 
     statements = [
+        # Shared DB safety: barcodes and idempotency keys must not collide
+        # across independent businesses/branches/apps.
+        "ALTER TABLE products DROP CONSTRAINT IF EXISTS products_barcode_key",
+        "DROP INDEX IF EXISTS ix_products_barcode",
+        (
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_products_business_barcode "
+            "ON products (business_id, barcode) WHERE barcode IS NOT NULL AND barcode <> ''"
+        ),
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS branch_id VARCHAR DEFAULT 'main'",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS card_amount DOUBLE PRECISION DEFAULT 0",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS other_paid_amount DOUBLE PRECISION DEFAULT 0",
@@ -35,9 +43,12 @@ def run_staff_billing_migrations(engine) -> None:
         "CREATE INDEX IF NOT EXISTS ix_transactions_source_app ON transactions (source_app)",
         "CREATE INDEX IF NOT EXISTS ix_transactions_sync_status ON transactions (sync_status)",
         "CREATE INDEX IF NOT EXISTS ix_transactions_created_by_staff_id ON transactions (created_by_staff_id)",
+        "ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_idempotency_key_key",
+        "DROP INDEX IF EXISTS ux_transactions_idempotency_key",
         (
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_transactions_idempotency_key "
-            "ON transactions (idempotency_key) WHERE idempotency_key IS NOT NULL"
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_transactions_shared_idempotency_key "
+            "ON transactions (business_id, branch_id, source_app, idempotency_key) "
+            "WHERE idempotency_key IS NOT NULL"
         ),
         "ALTER TABLE inventory_movements ADD COLUMN IF NOT EXISTS branch_id VARCHAR DEFAULT 'main'",
         "ALTER TABLE inventory_movements ADD COLUMN IF NOT EXISTS created_by_staff_id VARCHAR NULL",
@@ -60,6 +71,18 @@ def run_staff_billing_migrations(engine) -> None:
             "ON staff_profiles (firebase_uid) WHERE firebase_uid IS NOT NULL"
         ),
         "CREATE INDEX IF NOT EXISTS ix_staff_profiles_auth_email ON staff_profiles (auth_email)",
+        "ALTER TABLE staff_kots DROP CONSTRAINT IF EXISTS staff_kots_idempotency_key_key",
+        (
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_staff_kots_shared_idempotency_key "
+            "ON staff_kots (business_id, branch_id, idempotency_key) "
+            "WHERE idempotency_key IS NOT NULL"
+        ),
+        "ALTER TABLE staff_held_bills DROP CONSTRAINT IF EXISTS staff_held_bills_idempotency_key_key",
+        (
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_staff_held_bills_shared_idempotency_key "
+            "ON staff_held_bills (business_id, branch_id, idempotency_key) "
+            "WHERE idempotency_key IS NOT NULL"
+        ),
     ]
 
     with engine.begin() as connection:
