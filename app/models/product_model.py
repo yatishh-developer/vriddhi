@@ -38,7 +38,6 @@ class Product(
     )
     barcode = Column(
         String,
-        unique=True,
         nullable=True,
         index=True
     )

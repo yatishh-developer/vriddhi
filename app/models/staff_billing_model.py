@@ -84,7 +84,7 @@ class StaffKot(Base, TimestampMixin):
     total_amount = Column(Float, nullable=False, default=0.0)
     bill_transaction_id = Column(String, ForeignKey("transactions.id"), nullable=True, index=True)
 
-    idempotency_key = Column(String, nullable=True, unique=True, index=True)
+    idempotency_key = Column(String, nullable=True, index=True)
     created_by = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     created_by_staff_id = Column(String, nullable=True, index=True)
     source_app = Column(String, nullable=False, default="staff_billing_app", index=True)
@@ -109,7 +109,7 @@ class StaffHeldBill(Base, TimestampMixin):
     total_amount = Column(Float, nullable=False, default=0.0)
     bill_transaction_id = Column(String, ForeignKey("transactions.id"), nullable=True, index=True)
 
-    idempotency_key = Column(String, nullable=True, unique=True, index=True)
+    idempotency_key = Column(String, nullable=True, index=True)
     created_by = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     created_by_staff_id = Column(String, nullable=True, index=True)
     source_app = Column(String, nullable=False, default="staff_billing_app", index=True)

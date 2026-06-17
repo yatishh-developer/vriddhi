@@ -1,6 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
+from models.staff_billing_model import StaffProfile
 from schemas.staff_billing_schema import StaffBillCreate
 from schemas.staff_billing_schema import StaffBillItemPayload
 from schemas.staff_billing_schema import StaffFirebaseInviteAcceptRequest
@@ -86,6 +87,45 @@ def test_credit_payment_requires_customer():
 
     assert exc.value.status_code == 400
     assert exc.value.detail == "Credit payment requires customer"
+
+
+def test_credit_payment_requires_saved_customer_id():
+    flags = feature_flags_for_business_type("General")
+    permissions = {
+        **default_staff_permissions(flags),
+        "credit_sale": True,
+    }
+    payload = StaffBillCreate(
+        total=100,
+        subtotal=100,
+        credit_amount=100,
+        customer_name="Walk In",
+        items=[StaffBillItemPayload(product_name="Tea", quantity=1, price=100, subtotal=100)],
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        StaffBillingService._validate_bill_payload(payload, permissions)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Credit payment requires customer"
+
+
+def test_staff_billing_requires_allowed_app():
+    staff = StaffProfile(
+        id="staff-1",
+        business_id="business-1",
+        branch_id="main",
+        staff_name="Counter Staff",
+        role="cashier",
+        allowed_apps='["staff_attendance_app"]',
+        permissions_json="{}",
+        status="active",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        StaffBillingService._ensure_staff_billing_allowed(staff)
+
+    assert exc.value.status_code == 403
 
 
 def test_negative_payment_is_rejected():

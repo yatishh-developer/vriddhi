@@ -64,7 +64,7 @@ class Transaction(Base, TimestampMixin):
     created_by_staff_id = Column(String, nullable=True, index=True)
     source_app = Column(String, nullable=False, default="admin_app", index=True)
     sync_status = Column(String, nullable=False, default="synced", index=True)
-    idempotency_key = Column(String, nullable=True, unique=True, index=True)
+    idempotency_key = Column(String, nullable=True, index=True)
     device_id = Column(String, nullable=True)
 
     items = relationship("TransactionItem", back_populates="transaction", cascade="all, delete-orphan")
