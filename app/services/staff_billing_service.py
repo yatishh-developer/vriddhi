@@ -789,6 +789,10 @@ class StaffBillingService:
             device_id=payload.device_id,
         )
         db.add(transaction)
+        # Flush the parent row before child rows that carry FK references.
+        # PostgreSQL can otherwise reject staff_payments/transaction_items in
+        # shared DB flows when the unit of work emits child inserts first.
+        db.flush()
         StaffBillingService._apply_stock_movements(db, staff, transaction, payload.items)
         StaffBillingService._create_staff_payment(db, staff, transaction, payload)
         StaffBillingService._apply_customer_credit(db, staff, payload)
