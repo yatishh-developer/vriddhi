@@ -42,7 +42,11 @@ target_metadata = Base.metadata
 
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.get_database_url())
+# ConfigParser treats percent-encoded password characters (for example %40)
+# as interpolation syntax. Preserve the URL exactly while escaping only for
+# Alembic's config storage; get_main_option restores the single percent value.
+database_url = settings.get_database_url()
+config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 
 def run_migrations_offline() -> None:
