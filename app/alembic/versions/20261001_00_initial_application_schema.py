@@ -9,12 +9,28 @@ Phase 1-6 revisions remain responsible for their own additions.
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "20261001_00"
 down_revision = None
 branch_labels = None
 depends_on = None
+
+
+# This type is owned by this baseline revision.  It is created explicitly in
+# ``upgrade`` so ``checkfirst`` protects an empty-data database that retains a
+# type from an interrupted historical bootstrap.  ``create_type=False`` keeps
+# the following ``op.create_table`` from emitting a second CREATE TYPE.
+inventory_movement_type = postgresql.ENUM(
+    "SALE",
+    "REFUND",
+    "MANUAL_ADD",
+    "MANUAL_REMOVE",
+    "PURCHASE",
+    name="inventorymovementtype",
+    create_type=False,
+)
 
 
 def _timestamps() -> list[sa.Column]:
@@ -27,6 +43,8 @@ def _timestamps() -> list[sa.Column]:
 def upgrade() -> None:
     # Core application tables.  Keep this static rather than importing model
     # metadata, so future model edits cannot rewrite historical bootstrap DDL.
+    inventory_movement_type.create(op.get_bind(), checkfirst=True)
+
     op.create_table(
         "businesses",
         sa.Column("id", sa.String(), primary_key=True),
@@ -127,7 +145,7 @@ def upgrade() -> None:
         sa.Column("id", sa.String(), primary_key=True),
         sa.Column("business_id", sa.String(), sa.ForeignKey("businesses.id"), nullable=False),
         sa.Column("branch_id", sa.String()), sa.Column("product_id", sa.String(), sa.ForeignKey("products.id"), nullable=False),
-        sa.Column("movement_type", sa.Enum("SALE", "REFUND", "MANUAL_ADD", "MANUAL_REMOVE", "PURCHASE", name="inventorymovementtype"), nullable=False),
+        sa.Column("movement_type", inventory_movement_type, nullable=False),
         sa.Column("quantity", sa.Integer(), nullable=False), sa.Column("before_stock", sa.Integer(), nullable=False),
         sa.Column("after_stock", sa.Integer(), nullable=False), sa.Column("reference_id", sa.String()), sa.Column("notes", sa.String()),
         sa.Column("created_by", sa.String(), sa.ForeignKey("users.id"), nullable=False),
@@ -280,4 +298,4 @@ def downgrade() -> None:
         "transactions", "customers", "products", "users", "businesses",
     ):
         op.drop_table(table)
-    sa.Enum(name="inventorymovementtype").drop(op.get_bind(), checkfirst=True)
+    inventory_movement_type.drop(op.get_bind(), checkfirst=True)
