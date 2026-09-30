@@ -7,6 +7,7 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import Text
+from sqlalchemy import Index
 
 from core.base_model import TimestampMixin
 from database.database import Base
@@ -91,6 +92,13 @@ class StaffKot(Base, TimestampMixin):
     source_app = Column(String, nullable=False, default="staff_billing_app", index=True)
     sync_status = Column(String, nullable=False, default="pending", index=True)
 
+    __table_args__ = (
+        Index(
+            "ux_staff_kots_shared_idempotency_key", "business_id", "branch_id", "idempotency_key", unique=True,
+            postgresql_where=idempotency_key.isnot(None), sqlite_where=idempotency_key.isnot(None),
+        ),
+    )
+
 
 class StaffHeldBill(Base, TimestampMixin):
     __tablename__ = "staff_held_bills"
@@ -115,6 +123,13 @@ class StaffHeldBill(Base, TimestampMixin):
     created_by_staff_id = Column(String, nullable=True, index=True)
     source_app = Column(String, nullable=False, default="staff_billing_app", index=True)
     sync_status = Column(String, nullable=False, default="pending", index=True)
+
+    __table_args__ = (
+        Index(
+            "ux_staff_held_bills_shared_idempotency_key", "business_id", "branch_id", "idempotency_key", unique=True,
+            postgresql_where=idempotency_key.isnot(None), sqlite_where=idempotency_key.isnot(None),
+        ),
+    )
 
 
 class StaffPayment(Base, TimestampMixin):

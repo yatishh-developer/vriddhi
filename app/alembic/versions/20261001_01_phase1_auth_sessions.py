@@ -1,7 +1,7 @@
 """Add server-side session state for Phase 1 auth tokens.
 
 Revision ID: 20261001_01
-Revises: None
+Revises: 20261001_00
 Create Date: 2026-10-01
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "20261001_01"
-down_revision = None
+down_revision = "20261001_00"
 branch_labels = None
 depends_on = None
 

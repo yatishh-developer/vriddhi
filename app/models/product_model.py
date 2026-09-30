@@ -3,7 +3,7 @@ from sqlalchemy import String
 from sqlalchemy import Numeric
 from sqlalchemy import Boolean
 from sqlalchemy import Integer
-from sqlalchemy import ForeignKey
+from sqlalchemy import ForeignKey, Index
 
 from database.database import Base
 
@@ -94,4 +94,12 @@ class Product(
     ingredients = Column(
         String,
         nullable=True
+    )
+
+    __table_args__ = (
+        Index(
+            "ux_products_business_barcode", "business_id", "barcode", unique=True,
+            postgresql_where=barcode.isnot(None) & (barcode != ""),
+            sqlite_where=barcode.isnot(None) & (barcode != ""),
+        ),
     )

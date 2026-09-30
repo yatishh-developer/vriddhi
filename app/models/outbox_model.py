@@ -27,6 +27,7 @@ class OutboxEvent(Base, TimestampMixin):
     last_error = Column(Text, nullable=True)
 
     __table_args__ = (
+        Index("ix_outbox_events_created_at", "created_at"),
         Index("ix_outbox_status_available", "status", "available_at"),
         Index("ix_outbox_business_branch_type", "business_id", "branch_id", "event_type"),
     )

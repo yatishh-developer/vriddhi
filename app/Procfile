@@ -1,1 +1,3 @@
-web: uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2
+# Render runs this from the app directory.  Schema changes are migration-only:
+# upgrade is safe for a populated database and never performs a reset/drop.
+web: alembic -c ../alembic.ini upgrade head && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2
