@@ -11,8 +11,7 @@ class InventoryRepository:
         movement: InventoryMovement
     ):
         db.add(movement)
-        db.commit()
-        db.refresh(movement)
+        db.flush()
         return movement
 
     @staticmethod
@@ -50,6 +49,5 @@ class InventoryRepository:
         db: Session,
         product: Product
     ):
-        db.commit()
-        db.refresh(product)
+        db.flush()
         return product

@@ -6,12 +6,13 @@ from fastapi import HTTPException
 from fastapi import Query
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
-from fastapi.security import HTTPAuthorizationCredentials
-from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_staff, get_current_user, get_principal_context
+from auth.principal import PrincipalContext
+from auth.sessions import revoke_session
 from database.dependencies import get_db
+from models.auth_session_model import AuthSession
 from models.staff_billing_model import StaffHeldBill
 from models.staff_billing_model import StaffKot
 from models.staff_billing_model import StaffPayment
@@ -54,14 +55,6 @@ from services.staff_billing_service import staff_realtime_manager
 
 
 router = APIRouter(tags=["Staff Billing"])
-bearer_scheme = HTTPBearer(auto_error=True)
-
-
-def get_current_staff(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-    db: Session = Depends(get_db),
-):
-    return StaffBillingService.staff_from_token(db, credentials.credentials)
 
 
 def _invite_response(invite, invite_code=None):
@@ -350,9 +343,20 @@ def refresh_staff_access_token(
 @router.post("/staff/auth/logout")
 def staff_logout(
     staff=Depends(get_current_staff),
+    principal: PrincipalContext = Depends(get_principal_context),
     db: Session = Depends(get_db),
 ):
     staff.last_seen_at = None
+    if principal.session_id:
+        session = db.query(AuthSession).filter(AuthSession.id == principal.session_id).first()
+        if session:
+            revoke_session(db, session)
+            from services.domain_event_service import DomainEventService
+            DomainEventService.enqueue(
+                db, event_type="session.revoked", aggregate_type="session", aggregate_id=session.id,
+                business_id=principal.business_id, branch_id=principal.branch_id,
+                data={"session_id": session.id}, actor_id=principal.principal_id,
+            )
     db.commit()
     return {"message": "Logged out"}
 
@@ -413,9 +417,10 @@ def convert_staff_kot_to_bill(
     kot_id: str,
     payload: StaffBillCreate,
     staff=Depends(get_current_staff),
+    principal: PrincipalContext = Depends(get_principal_context),
     db: Session = Depends(get_db),
 ):
-    return StaffBillingService.convert_kot_to_bill(db, staff, kot_id, payload)
+    return StaffBillingService.convert_kot_to_bill(db, staff, kot_id, payload, principal)
 
 
 @router.get("/staff/bills", response_model=List[StaffBillResponse])
@@ -430,9 +435,10 @@ def staff_bills(
 def create_staff_bill(
     payload: StaffBillCreate,
     staff=Depends(get_current_staff),
+    principal: PrincipalContext = Depends(get_principal_context),
     db: Session = Depends(get_db),
 ):
-    return StaffBillingService.create_bill(db, staff, payload)
+    return StaffBillingService.create_bill(db, staff, payload, principal)
 
 
 @router.get("/staff/held-bills", response_model=List[StaffHeldBillResponse])

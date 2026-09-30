@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, String, Float, Boolean, ForeignKey
+from sqlalchemy import Column, String, Numeric, Boolean, ForeignKey
 
 from database.database import Base
 from core.base_model import TimestampMixin, SoftDeleteMixin
@@ -29,8 +29,8 @@ class Customer(Base, TimestampMixin, SoftDeleteMixin):
     address = Column(String, nullable=True, default="")
 
     # ── Extended fields for Flutter's CustomerProfile ─────────────────────
-    balance_remaining = Column(Float, default=0.0)
+    balance_remaining = Column(Numeric(12, 2), default=0)
 
     loyal_customer = Column(Boolean, default=False)
 
-    preset_discount = Column(Float, default=0.0)
+    preset_discount = Column(Numeric(12, 2), default=0)

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Float, ForeignKey
+from sqlalchemy import Column, String, Integer, Numeric, ForeignKey
 from sqlalchemy.orm import relationship
 
 from database.database import Base
@@ -23,8 +23,8 @@ class TransactionItem(Base, TimestampMixin):
 
     quantity = Column(Integer, nullable=False)
 
-    price = Column(Float, nullable=False)
+    price = Column(Numeric(12, 2), nullable=False)
 
-    subtotal = Column(Float, nullable=False)
+    subtotal = Column(Numeric(12, 2), nullable=False)
 
     transaction = relationship("Transaction", back_populates="items")

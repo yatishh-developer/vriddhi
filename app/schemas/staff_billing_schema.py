@@ -80,12 +80,14 @@ class StaffProfileAdminUpdate(BaseModel):
 
 
 class StaffInviteVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     invite_code: str
     device_id: Optional[str] = None
 
 
 class StaffFirebaseLoginRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     uid: Optional[str] = None
     id_token: Optional[str] = Field(
@@ -126,6 +128,8 @@ class StaffAuthResponse(BaseModel):
 
 
 class StaffRefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     refresh_token: str
 
 

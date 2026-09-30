@@ -1,4 +1,5 @@
 from models.transaction_model import Transaction
+from auth.errors import DomainError
 
 
 class TransactionRepository:
@@ -25,5 +26,7 @@ class TransactionRepository:
 
     @staticmethod
     def delete(db, transaction):
+        if transaction.status in {"completed", "finalized"}:
+            raise DomainError(409, "TRANSACTION_FINALIZED", "Finalized transactions cannot be deleted.")
         db.delete(transaction)
         db.commit()

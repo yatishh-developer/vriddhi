@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, get_principal_context
+from auth.errors import DomainError
+from auth.principal import PrincipalContext
 from database.dependencies import get_db
 from repositories.transaction_repository import TransactionRepository
 from schemas.transaction_schema import CreateTransactionRequest, TransactionResponse
@@ -24,9 +26,10 @@ def get_transactions(
 def create_transaction(
     payload: CreateTransactionRequest,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
+    principal: PrincipalContext = Depends(get_principal_context),
 ):
-    return TransactionService.create_transaction(db, current_user, payload)
+    return TransactionService.create_transaction(db, current_user, payload, principal)
 
 
 @router.get("/{transaction_id}", response_model=TransactionResponse)
@@ -50,5 +53,7 @@ def delete_transaction(
     transaction = TransactionRepository.get_by_id(db, transaction_id, current_user.business_id)
     if not transaction:
         raise HTTPException(status_code=404, detail="Transaction not found")
+    if transaction.status in {"completed", "finalized"}:
+        raise DomainError(409, "TRANSACTION_FINALIZED", "Finalized transactions cannot be deleted.")
     TransactionRepository.delete(db, transaction)
     return {"message": "Transaction deleted"}

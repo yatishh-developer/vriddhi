@@ -1,155 +1,74 @@
-import uuid
+import json
+from decimal import Decimal
 
-from fastapi import HTTPException
-
-from models.transaction_model import Transaction
-from models.transaction_item_model import TransactionItem
-from repositories.product_repository import ProductRepository
-from services.inventory_service import InventoryService
+from auth.principal import ActorType, PrincipalContext
+from schemas.checkout_schema import CheckoutItemInput, CheckoutPaymentInput, CheckoutRequest
+from services.checkout_service import CheckoutService
 
 
 class TransactionService:
+    """Compatibility adapter for the legacy admin transaction route."""
 
     @staticmethod
-    def create_transaction(db, current_user, payload):
-        """
-        Create (or upsert) a transaction.
-        Accepts full Flutter payload including items_json snapshot.
-        Product-based items list (payload.items) is used for stock deduction;
-        if empty, only the JSON snapshot is stored (offline-first support).
-        """
-
-        if payload.idempotency_key:
-            existing_by_key = db.query(Transaction).filter(
-                Transaction.business_id == current_user.business_id,
-                Transaction.idempotency_key == payload.idempotency_key,
-            ).first()
-            if existing_by_key:
-                return existing_by_key
-
-        # Upsert: if already exists, just update totals
-        existing = db.query(Transaction).filter(
-            Transaction.id == payload.id,
-            Transaction.business_id == current_user.business_id,
-        ).first()
-
-        if existing:
-            TransactionService._apply_payload(existing, payload)
-            db.commit()
-            db.refresh(existing)
-            return existing
-
-        transaction = Transaction(
-            id=payload.id,
+    def create_transaction(db, current_user, payload, principal: PrincipalContext | None = None):
+        principal = principal or PrincipalContext(
+            principal_id=current_user.id,
+            actor_type=ActorType.OWNER,
             business_id=current_user.business_id,
-            branch_id=payload.branch_id or "main",
+            user_id=current_user.id,
+            role="owner",
+            permissions=frozenset({"*"}),
+            capabilities=frozenset({"*"}),
+        )
+        request = TransactionService._legacy_request(payload)
+        return CheckoutService.checkout(
+            db,
+            principal=principal,
+            request=request,
+            source_app="admin_app",
+            legacy_transaction_id=payload.id,
+        )
+
+    @staticmethod
+    def _legacy_request(payload) -> CheckoutRequest:
+        items = [CheckoutItemInput(product_id=item.product_id, quantity=item.quantity) for item in (payload.items or [])]
+        if not items and payload.items_json:
+            try:
+                raw_items = json.loads(payload.items_json) if isinstance(payload.items_json, str) else payload.items_json
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raw_items = []
+            items = [
+                CheckoutItemInput(product_id=str(item["product_id"]), quantity=int(item.get("quantity", 1)))
+                for item in raw_items if isinstance(item, dict) and item.get("product_id")
+            ]
+        return CheckoutRequest(
+            items=items,
+            payment=CheckoutPaymentInput(
+                cash_amount=Decimal(str(payload.cash_amount or 0)),
+                upi_amount=Decimal(str(payload.upi_amount or 0)),
+                card_amount=Decimal(str(payload.card_amount or 0)),
+                other_paid_amount=Decimal(str(payload.other_paid_amount or 0)),
+                credit_amount=Decimal(str(payload.credit_amount or 0)),
+                payment_method=payload.payment_method or "Cash",
+                payment_option=payload.payment_option or payload.payment_method or "Cash",
+            ),
             customer_id=payload.customer_id,
-            payment_method=payload.payment_method or "Cash",
-            total_amount=payload.total or 0.0,
-            created_by=current_user.id,
-            source_app=payload.source_app or "admin_app",
-            sync_status=payload.sync_status or "synced",
+            discount=Decimal(str(payload.discount or 0)),
+            branch_id=payload.branch_id,
             idempotency_key=payload.idempotency_key,
             device_id=payload.device_id,
-            status="completed"
+            bill_no=payload.bill_no,
+            bill_date=payload.bill_date,
+            bill_date_text=payload.bill_date_text,
+            is_parcel=payload.is_parcel or False,
         )
-        TransactionService._apply_payload(transaction, payload)
-
-        db.add(transaction)
-
-        # If product items were supplied, deduct stock
-        total_amount = payload.total or 0.0
-
-        if payload.items:
-            total_amount = 0
-            for item in payload.items:
-                product = ProductRepository.get_by_id(
-                    db, item.product_id, current_user.business_id
-                )
-                if not product:
-                    raise HTTPException(status_code=404, detail=f"Product {item.product_id} not found")
-
-                subtotal = product.price * item.quantity
-                total_amount += subtotal
-
-                if not product.is_stockless:
-                    InventoryService.reduce_stock(
-                        db, current_user.business_id, product, item.quantity
-                    )
-
-                transaction_item = TransactionItem(
-                    id=str(uuid.uuid4()),
-                    transaction_id=transaction.id,
-                    product_id=product.id,
-                    product_name=product.name,
-                    quantity=item.quantity,
-                    price=product.price,
-                    subtotal=subtotal
-                )
-                db.add(transaction_item)
-
-            transaction.total_amount = total_amount
-
-        db.commit()
-        db.refresh(transaction)
-        return transaction
-
-    @staticmethod
-    def _apply_payload(transaction, payload):
-        """Map Flutter payload fields onto the SQLAlchemy model."""
-        transaction.flow = payload.flow or "Quick"
-        transaction.bill_no = payload.bill_no
-        transaction.bill_date = payload.bill_date
-        transaction.bill_date_text = payload.bill_date_text
-        transaction.due_date = payload.due_date
-        transaction.customer_name = payload.customer_name or ""
-        transaction.customer_phone = payload.customer_phone or ""
-        transaction.customer_address = payload.customer_address or ""
-        transaction.payment_option = payload.payment_option or payload.payment_method or "Cash"
-        transaction.cash_amount = payload.cash_amount or 0.0
-        transaction.upi_amount = payload.upi_amount or 0.0
-        transaction.card_amount = payload.card_amount or 0.0
-        transaction.other_paid_amount = payload.other_paid_amount or 0.0
-        transaction.credit_amount = payload.credit_amount or 0.0
-        transaction.discount = payload.discount or 0.0
-        transaction.is_parcel = payload.is_parcel or False
-        transaction.is_hold = payload.is_hold or False
-        transaction.items_json = payload.items_json or "[]"
-        transaction.subtotal = payload.subtotal or 0.0
-        transaction.total_cgst = payload.total_cgst or 0.0
-        transaction.total_sgst = payload.total_sgst or 0.0
-        transaction.total_igst = payload.total_igst or 0.0
-        transaction.total_tax = payload.total_tax or 0.0
-        transaction.old_balance = payload.old_balance or 0.0
-        transaction.is_intra_state = payload.is_intra_state if payload.is_intra_state is not None else True
-        transaction.branch_id = payload.branch_id or transaction.branch_id or "main"
-        transaction.source_app = payload.source_app or transaction.source_app or "admin_app"
-        transaction.sync_status = payload.sync_status or transaction.sync_status or "synced"
-        transaction.idempotency_key = payload.idempotency_key or transaction.idempotency_key
-        transaction.device_id = payload.device_id or transaction.device_id
-        if payload.total:
-            transaction.total_amount = payload.total
 
     @staticmethod
     def handle_queue_item(db, current_user, action: str, payload: dict):
-        """Handle a queued offline transaction operation from the Flutter sync queue."""
+        from auth.errors import DomainError
         from schemas.transaction_schema import CreateTransactionRequest
 
         if action == "create":
-            try:
-                data = CreateTransactionRequest(**payload)
-                TransactionService.create_transaction(db, current_user, data)
-            except Exception as e:
-                raise e
-
+            TransactionService.create_transaction(db, current_user, CreateTransactionRequest(**payload))
         elif action == "delete":
-            transaction_id = payload.get("id")
-            if not transaction_id:
-                return
-            transaction = db.query(Transaction).filter(
-                Transaction.id == transaction_id,
-                Transaction.business_id == current_user.business_id,
-            ).first()
-            if transaction:
-                db.delete(transaction)
-                db.commit()
+            raise DomainError(409, "TRANSACTION_FINALIZED", "Finalized transactions cannot be deleted.")

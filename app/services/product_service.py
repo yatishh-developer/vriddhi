@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from models.product_model import Product
 
 from repositories.product_repository import ProductRepository
+from services.inventory_service import InventoryService
 
 
 class ProductService:
@@ -94,18 +95,23 @@ class ProductService:
             exclude_unset=True
         )
 
+        requested_stock = update_data.pop("stock_quantity", None)
+        # Stock availability is derived from the tracked quantity (or the
+        # stockless flag), never accepted as an un-audited direct mutation.
+        update_data.pop("in_stock", None)
         for key, value in update_data.items():
             setattr(product, key, value)
 
-        if payload.stock_quantity is not None:
-            product.stock_quantity = max(
-                payload.stock_quantity,
-                0
+        if requested_stock is not None:
+            InventoryService.set_stock_with_movement(
+                db,
+                product=product,
+                target_quantity=requested_stock,
+                business_id=current_user.business_id,
+                created_by=current_user.id,
             )
-
-        product.in_stock = (
-            product.stock_quantity > 0
-        )
+        else:
+            product.in_stock = product.stock_quantity > 0 or product.is_stockless
 
         db.commit()
 

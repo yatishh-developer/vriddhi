@@ -1,9 +1,10 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from pydantic import EmailStr
 from typing import Optional
 
 
 class SignupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     email: EmailStr
     password: str
     business_name: str
@@ -12,6 +13,7 @@ class SignupRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     access_token: str
     token_type: str
     business_id: Optional[str] = None

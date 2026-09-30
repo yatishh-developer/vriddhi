@@ -14,7 +14,8 @@ async def global_exception_handler(request: Request, exc: Exception):
     in production to avoid leaking sensitive information.
     """
     logger.exception(
-        "Unhandled exception on %s %s",
+        "Unhandled exception request_id=%s on %s %s",
+        getattr(request.state, "request_id", "unknown"),
         request.method,
         request.url.path,
     )
@@ -22,7 +23,10 @@ async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=500,
         content={
-            "success": False,
-            "detail": "An internal server error occurred. Please try again later.",
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "An internal server error occurred. Please try again later.",
+                "request_id": getattr(request.state, "request_id", None),
+            },
         },
     )

@@ -16,14 +16,16 @@ except Exception as e:
     raise
 
 
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    pool_size=settings.DB_POOL_SIZE,
-    max_overflow=settings.DB_MAX_OVERFLOW,
-    pool_recycle=settings.DB_POOL_RECYCLE,
-    pool_timeout=settings.DB_POOL_TIMEOUT,
-    pool_pre_ping=True,
-)
+_engine_options = {"pool_pre_ping": True}
+if not SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+    _engine_options.update(
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
+        pool_recycle=settings.DB_POOL_RECYCLE,
+        pool_timeout=settings.DB_POOL_TIMEOUT,
+    )
+
+engine = create_engine(SQLALCHEMY_DATABASE_URL, **_engine_options)
 
 SessionLocal = sessionmaker(
     autocommit=False,

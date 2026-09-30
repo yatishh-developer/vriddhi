@@ -19,7 +19,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         process_time = time.time() - start_time
 
         logger.info(
-            "%s %s %d %.4fs",
+            "request_id=%s %s %s %d %.4fs",
+            getattr(request.state, "request_id", "unknown"),
             request.method,
             request.url.path,
             response.status_code,

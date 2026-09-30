@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 30
+
+    # Firebase Admin verifies staff identity tokens. Application Default
+    # Credentials are used when FIREBASE_CREDENTIALS_PATH is not supplied.
+    FIREBASE_PROJECT_ID: Optional[str] = None
+    FIREBASE_CREDENTIALS_PATH: Optional[str] = None
+    FIREBASE_CHECK_REVOKED: bool = True
 
     # Database connection components (prefixed with DB_ to avoid system env collisions)
     DB_USER: Optional[str] = Field(default=None, alias="DB_USER")
@@ -33,6 +40,14 @@ class Settings(BaseSettings):
     DB_POOL_TIMEOUT: int = 30
     RATE_LIMIT_REQUESTS: int = 120
     RATE_LIMIT_WINDOW_SECONDS: int = 60
+    AUTH_RATE_LIMIT_REQUESTS: int = 10
+    AUTH_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_ENABLED: bool = False
+    OUTBOX_POLL_INTERVAL_SECONDS: float = 1.0
+    OUTBOX_BATCH_SIZE: int = 50
+    OUTBOX_LEASE_SECONDS: int = 60
+    OUTBOX_RETENTION_DAYS: int = 14
 
     model_config = ConfigDict(
         env_file=str(Path(__file__).parent.parent.parent / ".env"),

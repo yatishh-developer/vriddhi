@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, ForeignKey, Boolean, Text
+from sqlalchemy import Column, String, Numeric, ForeignKey, Boolean, Text, Index
 from sqlalchemy.orm import relationship
 
 from database.database import Base
@@ -16,6 +16,8 @@ class Transaction(Base, TimestampMixin):
     )
 
     branch_id = Column(String, nullable=True, default="main", index=True)
+
+    order_id = Column(String, ForeignKey("orders.id"), nullable=True, unique=True, index=True)
 
     customer_id = Column(
         String, ForeignKey("customers.id"), nullable=True
@@ -35,12 +37,12 @@ class Transaction(Base, TimestampMixin):
     payment_method = Column(String, nullable=False)  # kept for compat
     payment_option = Column(String, nullable=True, default="Cash")
 
-    cash_amount = Column(Float, default=0.0)
-    upi_amount = Column(Float, default=0.0)
-    card_amount = Column(Float, default=0.0)
-    other_paid_amount = Column(Float, default=0.0)
-    credit_amount = Column(Float, default=0.0)
-    discount = Column(Float, default=0.0)
+    cash_amount = Column(Numeric(12, 2), default=0)
+    upi_amount = Column(Numeric(12, 2), default=0)
+    card_amount = Column(Numeric(12, 2), default=0)
+    other_paid_amount = Column(Numeric(12, 2), default=0)
+    credit_amount = Column(Numeric(12, 2), default=0)
+    discount = Column(Numeric(12, 2), default=0)
 
     is_parcel = Column(Boolean, default=False)
     is_hold = Column(Boolean, default=False)
@@ -49,13 +51,13 @@ class Transaction(Base, TimestampMixin):
     items_json = Column(Text, nullable=True, default="[]")
 
     # Totals
-    total_amount = Column(Float, nullable=False, default=0.0)
-    subtotal = Column(Float, default=0.0)
-    total_cgst = Column(Float, default=0.0)
-    total_sgst = Column(Float, default=0.0)
-    total_igst = Column(Float, default=0.0)
-    total_tax = Column(Float, default=0.0)
-    old_balance = Column(Float, default=0.0)
+    total_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    subtotal = Column(Numeric(12, 2), default=0)
+    total_cgst = Column(Numeric(12, 2), default=0)
+    total_sgst = Column(Numeric(12, 2), default=0)
+    total_igst = Column(Numeric(12, 2), default=0)
+    total_tax = Column(Numeric(12, 2), default=0)
+    old_balance = Column(Numeric(12, 2), default=0)
     is_intra_state = Column(Boolean, default=True)
 
     status = Column(String, default="completed")
@@ -68,3 +70,23 @@ class Transaction(Base, TimestampMixin):
     device_id = Column(String, nullable=True)
 
     items = relationship("TransactionItem", back_populates="transaction", cascade="all, delete-orphan")
+    order = relationship("Order", back_populates="transaction")
+
+    __table_args__ = (
+        Index(
+            "ux_transactions_shared_idempotency_key",
+            "business_id",
+            "branch_id",
+            "source_app",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=idempotency_key.isnot(None),
+            sqlite_where=idempotency_key.isnot(None),
+        ),
+    )
+
+
+# Transaction is part of the legacy test/import surface. Register the order
+# table whenever this model is imported so metadata can resolve order_id even
+# before a v1 route has been imported.
+from models.order_model import Order as _Order  # noqa: E402,F401

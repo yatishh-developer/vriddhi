@@ -61,7 +61,9 @@ class CustomerService:
             existing.phone = payload.phone or ""
             existing.email = payload.email
             existing.address = payload.address or ""
-            existing.balance_remaining = payload.balance_remaining or 0.0
+            # Kept in the compatibility schema for old clients, but customer
+            # profile writes must never overwrite the checkout-managed credit
+            # balance. A ledger/reconciliation flow is a later phase.
             existing.loyal_customer = payload.loyal_customer or False
             existing.preset_discount = payload.preset_discount or 0.0
             existing.is_deleted = False
@@ -76,7 +78,7 @@ class CustomerService:
             phone=payload.phone or "",
             email=payload.email,
             address=payload.address or "",
-            balance_remaining=payload.balance_remaining or 0.0,
+            balance_remaining=0,
             loyal_customer=payload.loyal_customer or False,
             preset_discount=payload.preset_discount or 0.0
         )
@@ -99,8 +101,6 @@ class CustomerService:
             customer.email = payload.email
         if payload.address is not None:
             customer.address = payload.address
-        if payload.balance_remaining is not None:
-            customer.balance_remaining = payload.balance_remaining
         if payload.loyal_customer is not None:
             customer.loyal_customer = payload.loyal_customer
         if payload.preset_discount is not None:

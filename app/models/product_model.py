@@ -1,6 +1,6 @@
 from sqlalchemy import Column
 from sqlalchemy import String
-from sqlalchemy import Float
+from sqlalchemy import Numeric
 from sqlalchemy import Boolean
 from sqlalchemy import Integer
 from sqlalchemy import ForeignKey
@@ -43,13 +43,13 @@ class Product(
     )
 
     price = Column(
-        Float,
+        Numeric(12, 2),
         nullable=False
     )
 
     # GST rate in percent (0, 5, 12, 18, 28). Sent by the Flutter client.
     gst_percentage = Column(
-        Float,
+        Numeric(5, 2),
         nullable=False,
         default=0
     )

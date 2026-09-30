@@ -2,6 +2,7 @@ from sqlalchemy import Boolean
 from sqlalchemy import Column
 from sqlalchemy import DateTime
 from sqlalchemy import Float
+from sqlalchemy import Numeric
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
@@ -126,12 +127,12 @@ class StaffPayment(Base, TimestampMixin):
     staff_name = Column(String, nullable=True)
     bill_transaction_id = Column(String, ForeignKey("transactions.id"), nullable=True, index=True)
 
-    cash_amount = Column(Float, nullable=False, default=0.0)
-    upi_amount = Column(Float, nullable=False, default=0.0)
-    card_amount = Column(Float, nullable=False, default=0.0)
-    other_paid_amount = Column(Float, nullable=False, default=0.0)
-    credit_amount = Column(Float, nullable=False, default=0.0)
-    total_paid_amount = Column(Float, nullable=False, default=0.0)
+    cash_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    upi_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    card_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    other_paid_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    credit_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    total_paid_amount = Column(Numeric(12, 2), nullable=False, default=0)
     payment_json = Column(Text, nullable=False, default="{}")
 
     created_by = Column(String, ForeignKey("users.id"), nullable=True, index=True)
