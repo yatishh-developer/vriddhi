@@ -18,8 +18,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy application code
 COPY . .
+RUN chmod +x /app/docker-entrypoint.sh
 
 EXPOSE 8000
 
-# Run with uvicorn - 2 workers for production
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# The entrypoint upgrades the configured DATABASE_URL before replacing itself
+# with Uvicorn.  A migration failure exits the container non-zero.
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
