@@ -67,6 +67,9 @@ class Transaction(Base, TimestampMixin):
     source_app = Column(String, nullable=False, default="admin_app", index=True)
     sync_status = Column(String, nullable=False, default="synced", index=True)
     idempotency_key = Column(String, nullable=True, index=True)
+    # Hash of the canonical client checkout intent.  It lets retries recover
+    # the original result while rejecting a reused key with different details.
+    checkout_request_hash = Column(String(64), nullable=True)
     device_id = Column(String, nullable=True)
 
     items = relationship("TransactionItem", back_populates="transaction", cascade="all, delete-orphan")

@@ -32,6 +32,9 @@ class OrderItemsCreate(BaseModel):
 
     items: list[OrderItemCreate] = Field(min_length=1)
     expected_version: Optional[int] = Field(default=None, ge=1)
+    # Optional for legacy callers. The v1 Flutter quick-sale flow must supply
+    # this stable key so an interrupted add-items request is replay-safe.
+    idempotency_key: Optional[str] = Field(default=None, max_length=128)
 
 
 class OrderItemUpdate(BaseModel):

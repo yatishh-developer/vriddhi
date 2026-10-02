@@ -69,6 +69,33 @@ class OrderItem(Base, TimestampMixin):
     )
 
 
+class OrderItemMutation(Base, TimestampMixin):
+    """Durable result marker for an idempotent v1 add-items operation."""
+
+    __tablename__ = "order_item_mutations"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    business_id = Column(String, ForeignKey("businesses.id"), nullable=False, index=True)
+    branch_id = Column(String, nullable=False, index=True)
+    order_id = Column(String, ForeignKey("orders.id"), nullable=False, index=True)
+    operation = Column(String, nullable=False, default="ADD_ITEMS")
+    idempotency_key = Column(String, nullable=False)
+    request_hash = Column(String(64), nullable=False)
+    result_order_version = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ux_order_item_mutations_identity",
+            "business_id",
+            "branch_id",
+            "order_id",
+            "operation",
+            "idempotency_key",
+            unique=True,
+        ),
+    )
+
+
 # Orders remain importable by the legacy transaction model; registering the
 # table/session metadata here keeps all foreign keys resolvable in that path.
 from models.table_management_model import RestaurantTable as _RestaurantTable  # noqa: E402,F401

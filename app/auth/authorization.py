@@ -28,7 +28,10 @@ LEGACY_PERMISSION_ALIASES = {
 # keeps existing staff profiles usable while new roles can store the dotted
 # permissions directly.
 LEGACY_PERMISSION_GRANTS = {
-    "create_bill": {"orders.view", "orders.create", "orders.modify", "products.view", "customers.view"},
+    "create_bill": {
+        "orders.view", "orders.create", "orders.modify", "products.view",
+        "customers.view", "customers.create",
+    },
     "hold_bill": {"orders.hold"},
     "resume_held_bill": {"orders.resume"},
     "cancel_bill": {"orders.cancel"},

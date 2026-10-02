@@ -33,6 +33,12 @@ class KitchenOrderTicket(Base, TimestampMixin):
     cancelled_at = Column(DateTime(timezone=True), nullable=True)
     version = Column(Integer, nullable=False, default=1)
     idempotency_key = Column(String, nullable=True)
+    # Canonical create request hash; protects a reused key from silently
+    # producing a ticket for a different kitchen intent.
+    request_hash = Column(String(64), nullable=True)
+    # JSON snapshot of the session's table names at ticket creation. It keeps
+    # KOT history/reprints coherent when the session later moves tables.
+    table_names_snapshot = Column(Text, nullable=True)
 
     items = relationship("KitchenOrderTicketItem", back_populates="kot", cascade="all, delete-orphan")
 

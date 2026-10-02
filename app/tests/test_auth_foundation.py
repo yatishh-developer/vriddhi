@@ -284,3 +284,24 @@ def test_request_id_and_safe_auth_error_response():
 def test_auth_request_schemas_forbid_unknown_fields():
     with pytest.raises(Exception):
         StaffFirebaseLoginRequest(id_token="token", unexpected="value")
+
+
+def test_request_validation_uses_the_standard_error_envelope():
+    from main import app
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/auth/signup",
+            headers={"X-Request-ID": "validation-request-1"},
+            json={"email": "not-an-email"},
+        )
+
+    assert response.status_code == 422
+    assert response.headers["X-Request-ID"] == "validation-request-1"
+    assert response.json() == {
+        "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "Request validation failed.",
+            "request_id": "validation-request-1",
+        }
+    }

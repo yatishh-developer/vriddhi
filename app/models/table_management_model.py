@@ -38,6 +38,11 @@ class TableSession(Base, TimestampMixin):
     business_id = Column(String, ForeignKey("businesses.id"), nullable=False, index=True)
     branch_id = Column(String, nullable=False, default="main", index=True)
     primary_table_id = Column(String, ForeignKey("restaurant_tables.id"), nullable=False, index=True)
+    # Immutable original table identity used to recover an interrupted open
+    # even if this session is later moved to another physical table.
+    opened_table_id = Column(String, ForeignKey("restaurant_tables.id"), nullable=True, index=True)
+    open_idempotency_key = Column(String, nullable=True)
+    open_request_hash = Column(String(64), nullable=True)
     status = Column(String, nullable=False, default="OPEN", index=True)
     guest_count = Column(Integer, nullable=False, default=1)
     customer_id = Column(String, ForeignKey("customers.id"), nullable=True, index=True)
@@ -53,6 +58,16 @@ class TableSession(Base, TimestampMixin):
 
     __table_args__ = (
         Index("ix_table_sessions_business_branch_status", "business_id", "branch_id", "status"),
+        Index(
+            "ux_table_sessions_open_idempotency",
+            "business_id",
+            "branch_id",
+            "opened_table_id",
+            "open_idempotency_key",
+            unique=True,
+            postgresql_where=open_idempotency_key.isnot(None),
+            sqlite_where=open_idempotency_key.isnot(None),
+        ),
     )
 
 

@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+import hashlib
+import json
 import uuid
 
 from sqlalchemy.exc import IntegrityError
@@ -9,7 +11,7 @@ from auth.authorization import require_branch_access, require_business_access, r
 from auth.errors import DomainError
 from auth.principal import PrincipalContext
 from models.customer_model import Customer
-from models.order_model import Order, OrderItem
+from models.order_model import Order, OrderItem, OrderItemMutation
 from models.product_model import Product
 from models.transaction_model import Transaction
 from schemas.checkout_schema import CheckoutItemInput, CheckoutRequest
@@ -32,6 +34,7 @@ from services.domain_event_service import DomainEventService
 
 V1_SOURCE_APP = "unified_api_v1"
 MUTABLE_ORDER_STATUSES = {"DRAFT", "ACTIVE"}
+ADD_ITEMS_OPERATION = "ADD_ITEMS"
 
 
 class OrderService:
@@ -79,6 +82,57 @@ class OrderService:
     @staticmethod
     def _increment_version(order: Order) -> None:
         order.version += 1
+
+    @staticmethod
+    def _add_items_fingerprint(order_id: str, payload: OrderItemsCreate) -> str:
+        """Hash the logical cart materialization, independent of JSON order."""
+        intent = {
+            "operation": ADD_ITEMS_OPERATION,
+            "order_id": order_id,
+            "items": sorted(
+                [
+                    {
+                        "product_id": item.product_id,
+                        "quantity": item.quantity,
+                        "notes": item.notes,
+                    }
+                    for item in payload.items
+                ],
+                key=lambda item: (
+                    item["product_id"],
+                    item["quantity"],
+                    "" if item["notes"] is None else item["notes"],
+                ),
+            ),
+        }
+        encoded = json.dumps(intent, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _item_mutation(
+        db: Session,
+        *,
+        business_id: str,
+        branch_id: str,
+        order_id: str,
+        idempotency_key: str,
+    ) -> OrderItemMutation | None:
+        return db.query(OrderItemMutation).filter(
+            OrderItemMutation.business_id == business_id,
+            OrderItemMutation.branch_id == branch_id,
+            OrderItemMutation.order_id == order_id,
+            OrderItemMutation.operation == ADD_ITEMS_OPERATION,
+            OrderItemMutation.idempotency_key == idempotency_key,
+        ).first()
+
+    @staticmethod
+    def _validate_item_mutation(mutation: OrderItemMutation, request_hash: str) -> None:
+        if mutation.request_hash != request_hash:
+            raise DomainError(
+                409,
+                "IDEMPOTENCY_CONFLICT",
+                "This item-mutation key was already used with different items.",
+            )
 
     @staticmethod
     def _response(db: Session, order: Order) -> OrderResponse:
@@ -195,9 +249,58 @@ class OrderService:
     def add_items(db: Session, principal: PrincipalContext, business_id: str, branch_id: str, order_id: str, payload: OrderItemsCreate) -> OrderResponse:
         require_permission(principal, "orders.modify")
         order = OrderService._order(db, principal, business_id, branch_id, order_id, lock=True)
+        request_hash = None
+        if payload.idempotency_key:
+            request_hash = OrderService._add_items_fingerprint(order.id, payload)
+            existing = OrderService._item_mutation(
+                db,
+                business_id=business_id,
+                branch_id=branch_id,
+                order_id=order.id,
+                idempotency_key=payload.idempotency_key,
+            )
+            if existing:
+                # Recovery deliberately precedes version/state validation: the
+                # first request may have committed and its response been lost.
+                OrderService._validate_item_mutation(existing, request_hash)
+                return OrderService._response(db, order)
         OrderService._check_version(order, payload.expected_version)
         if order.status not in MUTABLE_ORDER_STATUSES:
             raise DomainError(409, "ORDER_NOT_MODIFIABLE", "Only active draft order items can be modified.")
+        mutation = None
+        if payload.idempotency_key:
+            mutation = OrderItemMutation(
+                id=str(uuid.uuid4()),
+                business_id=business_id,
+                branch_id=branch_id,
+                order_id=order.id,
+                operation=ADD_ITEMS_OPERATION,
+                idempotency_key=payload.idempotency_key,
+                request_hash=request_hash,
+                # Set to the final version immediately before commit.
+                result_order_version=order.version,
+            )
+            try:
+                db.add(mutation)
+                # The unique constraint is the cross-process backstop. The
+                # order row lock serializes normal concurrent calls first.
+                db.flush()
+            except IntegrityError as exc:
+                db.rollback()
+                existing = OrderService._item_mutation(
+                    db,
+                    business_id=business_id,
+                    branch_id=branch_id,
+                    order_id=order_id,
+                    idempotency_key=payload.idempotency_key,
+                )
+                if existing:
+                    OrderService._validate_item_mutation(existing, request_hash)
+                    recovered_order = OrderService._order(
+                        db, principal, business_id, branch_id, order_id, lock=False,
+                    )
+                    return OrderService._response(db, recovered_order)
+                raise DomainError(409, "IDEMPOTENCY_CONFLICT", "Item mutation could not be recovered.") from exc
         product_ids = sorted({item.product_id for item in payload.items})
         products = {
             product.id: product
@@ -219,6 +322,8 @@ class OrderService:
             db.add(created)
             created_items.append(created)
         OrderService._increment_version(order)
+        if mutation:
+            mutation.result_order_version = order.version
         for item in created_items:
             DomainEventService.enqueue(
                 db, event_type="order.item_added", aggregate_type="order", aggregate_id=order.id,
@@ -309,16 +414,79 @@ class OrderService:
         return OrderService._response(db, order)
 
     @staticmethod
+    def _checkout_request_for_order(
+        order: Order,
+        payload: OrderCheckoutRequest,
+        branch_id: str,
+    ) -> tuple[CheckoutRequest, list[OrderItem]]:
+        """Build checkout intent from persisted items, never client totals."""
+        if order.status == "COMPLETED":
+            items = [
+                item for item in order.items
+                if item.status == "BILLED" and item.billed_quantity > 0
+            ]
+            checkout_items = [
+                CheckoutItemInput(
+                    product_id=item.product_id,
+                    quantity=item.billed_quantity,
+                    notes=item.notes,
+                )
+                for item in items
+            ]
+        else:
+            items = [
+                item for item in order.items
+                if item.status == "DRAFT" and item.quantity > item.cancelled_quantity
+            ]
+            checkout_items = [
+                CheckoutItemInput(
+                    product_id=item.product_id,
+                    quantity=item.quantity - item.cancelled_quantity,
+                    notes=item.notes,
+                )
+                for item in items
+            ]
+        if not checkout_items:
+            raise DomainError(400, "ORDER_EMPTY", "Order has no billable items.")
+        return (
+            CheckoutRequest(
+                items=checkout_items,
+                payment=payload.payment,
+                customer_id=order.customer_id,
+                discount=payload.discount,
+                branch_id=branch_id,
+                # Legacy callers may omit the key, but the fallback remains
+                # deterministic per order so retries can never create a bill.
+                idempotency_key=payload.idempotency_key or f"order:{order.id}:checkout",
+                is_parcel=payload.is_parcel or order.order_type == "TAKEAWAY",
+            ),
+            items,
+        )
+
+    @staticmethod
     def checkout(db: Session, principal: PrincipalContext, business_id: str, branch_id: str, order_id: str, payload: OrderCheckoutRequest) -> OrderCheckoutResponse:
         OrderService._scope(principal, business_id, branch_id)
         require_capability(principal, "billing")
         require_permission(principal, "billing.create")
         order = OrderService._order(db, principal, business_id, branch_id, order_id, lock=True)
-        OrderService._check_version(order, payload.expected_version)
         if order.status == "COMPLETED":
             transaction = db.query(Transaction).filter(Transaction.order_id == order.id).first()
             if transaction:
+                checkout_request, _ = OrderService._checkout_request_for_order(order, payload, branch_id)
+                if transaction.idempotency_key != checkout_request.idempotency_key:
+                    raise DomainError(
+                        409,
+                        "ORDER_ALREADY_FINALIZED",
+                        "This order was already finalized with a different checkout key.",
+                    )
+                CheckoutService.validate_idempotent_result(
+                    transaction,
+                    order_id=order.id,
+                    request_fingerprint=CheckoutService.request_fingerprint(checkout_request, order_id=order.id),
+                )
                 return OrderCheckoutResponse(order=OrderService._response(db, order), checkout=CheckoutService.response(transaction))
+            raise DomainError(409, "ORDER_ALREADY_FINALIZED", "This order is already finalized.")
+        OrderService._check_version(order, payload.expected_version)
         if order.status != "ACTIVE":
             raise DomainError(409, "ORDER_TRANSITION_INVALID", "Only active orders can be checked out.")
         if order.order_type == "DINE_IN":
@@ -333,18 +501,7 @@ class OrderService:
                 raise DomainError(404, "DINE_IN_ORDER_NOT_FOUND", "Dine-in order has no active table session.")
             if session.status in {"CLOSED", "CANCELLED"}:
                 raise DomainError(409, "TABLE_SESSION_CLOSED", "Table session is no longer open.")
-        items = [item for item in order.items if item.status == "DRAFT" and item.quantity > item.cancelled_quantity]
-        if not items:
-            raise DomainError(400, "ORDER_EMPTY", "Order has no billable items.")
-        checkout_request = CheckoutRequest(
-            items=[CheckoutItemInput(product_id=item.product_id, quantity=item.quantity - item.cancelled_quantity, notes=item.notes) for item in items],
-            payment=payload.payment,
-            customer_id=order.customer_id,
-            discount=payload.discount,
-            branch_id=branch_id,
-            idempotency_key=payload.idempotency_key or f"order:{order.id}:checkout",
-            is_parcel=payload.is_parcel or order.order_type == "TAKEAWAY",
-        )
+        checkout_request, items = OrderService._checkout_request_for_order(order, payload, branch_id)
 
         def complete_order(transaction: Transaction) -> None:
             order.status = "COMPLETED"
@@ -383,6 +540,7 @@ class OrderService:
 
     @staticmethod
     def get(db: Session, principal: PrincipalContext, business_id: str, branch_id: str, order_id: str) -> OrderResponse:
+        require_permission(principal, "orders.view")
         return OrderService._response(db, OrderService._order(db, principal, business_id, branch_id, order_id))
 
     @staticmethod

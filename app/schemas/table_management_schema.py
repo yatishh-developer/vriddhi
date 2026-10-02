@@ -41,6 +41,8 @@ class TableActiveSessionSummary(BaseModel):
     guest_count: int
     opened_at: datetime
     order_id: Optional[str] = None
+    order_status: Optional[str] = None
+    order_version: Optional[int] = None
     item_count: int
 
 
@@ -72,6 +74,7 @@ class TableSessionCreate(BaseModel):
     guest_count: int = Field(gt=0, le=100)
     customer_id: Optional[str] = None
     notes: Optional[str] = Field(default=None, max_length=1000)
+    idempotency_key: Optional[str] = Field(default=None, max_length=128)
 
 
 class TableSessionUpdate(BaseModel):

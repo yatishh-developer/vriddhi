@@ -10,6 +10,7 @@ from auth.principal import ActorType, PrincipalContext
 from database.database import Base
 from models.business_model import Business
 from models.inventory_movement_model import InventoryMovement
+from models.kot_model import KitchenOrderTicket
 from models.order_model import Order
 from models.outbox_model import OutboxEvent
 from models.product_model import Product
@@ -18,6 +19,7 @@ from models.table_management_model import RestaurantTable, TableSession
 from models.transaction_model import Transaction
 from models.user_model import User
 from schemas.order_schema import OrderCheckoutRequest, OrderItemCreate, OrderItemsCreate
+from schemas.kot_schema import KOTCreateRequest
 from schemas.table_management_schema import (
     RestaurantTableCreate,
     TableSessionAttachTableRequest,
@@ -28,6 +30,7 @@ from schemas.table_management_schema import (
     TableSessionUpdate,
 )
 from services.order_service import OrderService
+from services.kot_service import KotService
 from services.staff_billing_service import StaffBillingService
 from services.table_management_service import TableManagementService
 
@@ -136,9 +139,33 @@ def test_table_list_and_open_session_provide_occupancy_and_dine_in_order(db):
     listed = TableManagementService.list_tables(db, _owner(), "cafe-a", "branch-a")[0]
     assert listed.state == "OCCUPIED"
     assert listed.active_session.order_id == opened.order.id
+    assert listed.active_session.order_status == "ACTIVE"
+    assert listed.active_session.order_version == opened.order.version
     assert db.query(OutboxEvent).filter(OutboxEvent.event_type == "table.session_opened").count() == 1
     assert db.query(OutboxEvent).filter(OutboxEvent.event_type == "order.created").count() == 1
     assert _error(lambda: _open(db, table.id)) == "TABLE_ALREADY_OCCUPIED"
+
+
+def test_open_session_idempotency_recovers_response_loss_and_rejects_changed_intent(db):
+    table = _table(db)
+    payload = TableSessionCreate(guest_count=3, notes="Window", idempotency_key="open-response-loss")
+    first = TableManagementService.open_session(db, _owner(), "cafe-a", "branch-a", table.id, payload)
+    db.expunge_all()
+    retry = TableManagementService.open_session(db, _owner(), "cafe-a", "branch-a", table.id, payload)
+
+    assert first.session.id == retry.session.id
+    assert first.order.id == retry.order.id
+    assert db.query(TableSession).count() == 1
+    assert db.query(Order).filter(Order.table_session_id == first.session.id).count() == 1
+    assert db.query(OutboxEvent).filter(OutboxEvent.event_type == "table.session_opened").count() == 1
+    assert _error(lambda: TableManagementService.open_session(
+        db,
+        _owner(),
+        "cafe-a",
+        "branch-a",
+        table.id,
+        TableSessionCreate(guest_count=4, notes="Window", idempotency_key="open-response-loss"),
+    )) == "IDEMPOTENCY_CONFLICT"
 
 
 def test_existing_order_api_adds_items_and_session_versioning_and_bill_request_work(db):
@@ -163,20 +190,34 @@ def test_existing_order_api_adds_items_and_session_versioning_and_bill_request_w
     )
     assert requested.status == "BILL_REQUESTED"
 
+    customer_updated = TableManagementService.update_session(
+        db,
+        _owner(),
+        "cafe-a",
+        "branch-a",
+        opened.session.id,
+        TableSessionUpdate(customer_id=None, expected_version=requested.version),
+    )
+    assert customer_updated.order.version == order.version + 1
+
 
 def test_successful_checkout_closes_session_and_makes_table_available(db):
     table = _table(db)
     opened = _open(db, table.id)
     OrderService.add_items(db, _owner(), "cafe-a", "branch-a", opened.order.id, OrderItemsCreate(items=[OrderItemCreate(product_id="coffee", quantity=1)]))
+    request = OrderCheckoutRequest(payment={"cash_amount": "50.00"}, idempotency_key="table-checkout-retry")
     result = OrderService.checkout(
         db, _owner(), "cafe-a", "branch-a", opened.order.id,
-        OrderCheckoutRequest(payment={"cash_amount": "50.00"}),
+        request,
     )
+    retry = OrderService.checkout(db, _owner(), "cafe-a", "branch-a", opened.order.id, request)
 
     assert result.order.status == "COMPLETED"
+    assert retry.checkout.transaction_id == result.checkout.transaction_id
     assert db.get(TableSession, opened.session.id).status == "CLOSED"
     assert TableManagementService.get_table(db, _owner(), "cafe-a", "branch-a", table.id).state == "AVAILABLE"
     assert db.query(Transaction).filter(Transaction.order_id == opened.order.id).count() == 1
+    assert db.query(OutboxEvent).filter(OutboxEvent.event_type == "table.session_closed").count() == 1
 
 
 def test_failed_checkout_keeps_session_occupied_and_open(db):
@@ -229,6 +270,94 @@ def test_empty_session_cancel_and_move_and_merge_operations(db):
     )
     assert cancelled.status == "CANCELLED"
     assert TableManagementService.get_table(db, _owner(), "cafe-a", "branch-a", source.id).state == "AVAILABLE"
+
+
+def test_move_to_occupied_target_leaves_original_session_untouched(db):
+    source = _table(db, "T1")
+    occupied_target = _table(db, "T2")
+    original = _open(db, source.id)
+    target_session = _open(db, occupied_target.id)
+
+    assert _error(lambda: TableManagementService.move_session(
+        db,
+        _owner(),
+        "cafe-a",
+        "branch-a",
+        original.session.id,
+        TableSessionMoveRequest(destination_table_id=occupied_target.id, expected_version=original.session.version),
+    )) == "DESTINATION_TABLE_OCCUPIED"
+    assert TableManagementService.active_session(db, _owner(), "cafe-a", "branch-a", source.id).id == original.session.id
+    assert TableManagementService.active_session(db, _owner(), "cafe-a", "branch-a", occupied_target.id).id == target_session.session.id
+
+
+def test_multi_table_checkout_releases_every_link_and_kot_snapshots_table_names(db):
+    source = _table(db, "T1")
+    destination = _table(db, "T4")
+    extra = _table(db, "T2")
+    opened = _open(db, source.id)
+    first_items = OrderService.add_items(
+        db,
+        _owner(),
+        "cafe-a",
+        "branch-a",
+        opened.order.id,
+        OrderItemsCreate(items=[OrderItemCreate(product_id="coffee", quantity=1)]),
+    )
+    kot_one = KotService.create(
+        db,
+        _owner(),
+        "cafe-a",
+        "branch-a",
+        opened.order.id,
+        KOTCreateRequest(idempotency_key="table-kot-one", expected_order_version=first_items.version),
+    )
+    moved = TableManagementService.move_session(
+        db,
+        _owner(),
+        "cafe-a",
+        "branch-a",
+        opened.session.id,
+        TableSessionMoveRequest(destination_table_id=destination.id, expected_version=opened.session.version),
+    )
+    attached = TableManagementService.attach_table(
+        db,
+        _owner(),
+        "cafe-a",
+        "branch-a",
+        opened.session.id,
+        TableSessionAttachTableRequest(table_id=extra.id, expected_version=moved.version),
+    )
+    second_items = OrderService.add_items(
+        db,
+        _owner(),
+        "cafe-a",
+        "branch-a",
+        opened.order.id,
+        OrderItemsCreate(items=[OrderItemCreate(product_id="coffee", quantity=1)], expected_version=kot_one.order_version),
+    )
+    kot_two = KotService.create(
+        db,
+        _owner(),
+        "cafe-a",
+        "branch-a",
+        opened.order.id,
+        KOTCreateRequest(idempotency_key="table-kot-two", expected_order_version=second_items.version),
+    )
+
+    assert KotService.get(db, _owner(), "cafe-a", "branch-a", kot_one.id).table.table_names == ["T1"]
+    assert kot_two.table.table_names == ["T4", "T2"]
+    assert db.query(KitchenOrderTicket).filter(KitchenOrderTicket.order_id == opened.order.id).count() == 2
+
+    OrderService.checkout(
+        db,
+        _owner(),
+        "cafe-a",
+        "branch-a",
+        opened.order.id,
+        OrderCheckoutRequest(payment={"cash_amount": "100.00"}, idempotency_key="multi-table-checkout"),
+    )
+    assert {TableManagementService.get_table(db, _owner(), "cafe-a", "branch-a", table.id).state for table in (destination, extra)} == {"AVAILABLE"}
+    assert attached.order.id == opened.order.id
 
 
 def test_cafe_pilot_workflow_end_to_end(db):

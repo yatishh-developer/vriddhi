@@ -60,8 +60,11 @@ class CheckoutItemResponse(BaseModel):
 class CheckoutResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    order_id: Optional[str] = None
     transaction_id: str
     bill_number: Optional[str] = None
+    payment_method: str
+    payment_option: Optional[str] = None
     subtotal: Decimal
     total_cgst: Decimal
     total_sgst: Decimal

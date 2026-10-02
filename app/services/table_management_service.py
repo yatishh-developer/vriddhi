@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import hashlib
+import json
 import uuid
 
 from sqlalchemy.exc import IntegrityError
@@ -106,6 +108,8 @@ class TableManagementService:
                 guest_count=session.guest_count,
                 opened_at=session.opened_at,
                 order_id=order.id if order else None,
+                order_status=order.status if order else None,
+                order_version=order.version if order else None,
                 item_count=len(order.items) if order else 0,
             )
             state = "OCCUPIED"
@@ -133,6 +137,45 @@ class TableManagementService:
             tables=[TableSessionTableResponse(table_id=link.table_id, name=link.table.name, is_primary=link.is_primary, attached_at=link.attached_at) for link in links],
             order=OrderService._response(db, order) if order else None,
         )
+
+    @staticmethod
+    def _open_fingerprint(table_id: str, payload: TableSessionCreate) -> str:
+        intent = {
+            "operation": "OPEN_TABLE_SESSION",
+            "table_id": table_id,
+            "guest_count": payload.guest_count,
+            "customer_id": payload.customer_id,
+            "notes": payload.notes,
+        }
+        encoded = json.dumps(intent, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _idempotent_open(
+        db: Session,
+        *,
+        business_id: str,
+        branch_id: str,
+        table_id: str,
+        idempotency_key: str,
+    ) -> TableSession | None:
+        return db.query(TableSession).filter(
+            TableSession.business_id == business_id,
+            TableSession.branch_id == branch_id,
+            TableSession.opened_table_id == table_id,
+            TableSession.open_idempotency_key == idempotency_key,
+        ).first()
+
+    @staticmethod
+    def _validate_idempotent_open(session: TableSession, request_hash: str) -> None:
+        # Keep historical sessions created before F8A replayable; all newly
+        # created idempotent opens persist a hash and reject changed intent.
+        if session.open_request_hash and session.open_request_hash != request_hash:
+            raise DomainError(
+                409,
+                "IDEMPOTENCY_CONFLICT",
+                "This table-open key was already used with different details.",
+            )
 
     @staticmethod
     def create_table(db: Session, principal: PrincipalContext, business_id: str, branch_id: str, payload: RestaurantTableCreate) -> RestaurantTableResponse:
@@ -184,8 +227,43 @@ class TableManagementService:
 
     @staticmethod
     def open_session(db: Session, principal: PrincipalContext, business_id: str, branch_id: str, table_id: str, payload: TableSessionCreate) -> TableSessionOpenResponse:
+        TableManagementService._scope(db, principal, business_id, branch_id)
         require_permission(principal, "tables.open")
+        request_hash = None
+        if payload.idempotency_key:
+            request_hash = TableManagementService._open_fingerprint(table_id, payload)
+            existing = TableManagementService._idempotent_open(
+                db,
+                business_id=business_id,
+                branch_id=branch_id,
+                table_id=table_id,
+                idempotency_key=payload.idempotency_key,
+            )
+            if existing:
+                TableManagementService._validate_idempotent_open(existing, request_hash)
+                order = TableManagementService._order(db, existing)
+                return TableSessionOpenResponse(
+                    session=TableManagementService._session_response(db, existing),
+                    order=OrderService._response(db, order),
+                )
         table = TableManagementService._table(db, principal, business_id, branch_id, table_id, lock=True)
+        if payload.idempotency_key:
+            # A concurrent same-key request can commit while this request waits
+            # for the physical table's authoritative row lock.
+            existing = TableManagementService._idempotent_open(
+                db,
+                business_id=business_id,
+                branch_id=branch_id,
+                table_id=table.id,
+                idempotency_key=payload.idempotency_key,
+            )
+            if existing:
+                TableManagementService._validate_idempotent_open(existing, request_hash)
+                order = TableManagementService._order(db, existing)
+                return TableSessionOpenResponse(
+                    session=TableManagementService._session_response(db, existing),
+                    order=OrderService._response(db, order),
+                )
         if not table.is_active:
             raise DomainError(409, "TABLE_INACTIVE", "Table is inactive.")
         if TableManagementService._active_link(db, table.id):
@@ -194,6 +272,7 @@ class TableManagementService:
         now = datetime.now(timezone.utc)
         session = TableSession(
             id=str(uuid.uuid4()), business_id=business_id, branch_id=branch_id, primary_table_id=table.id,
+            opened_table_id=table.id, open_idempotency_key=payload.idempotency_key, open_request_hash=request_hash,
             status="OPEN", guest_count=payload.guest_count, customer_id=payload.customer_id,
             opened_by_principal_id=principal.principal_id, opened_at=now, notes=payload.notes, version=1,
         )
@@ -216,7 +295,22 @@ class TableManagementService:
             return TableSessionOpenResponse(session=TableManagementService._session_response(db, session), order=OrderService._response(db, order))
         except IntegrityError as exc:
             db.rollback()
-            if TableManagementService._active_link(db, table.id):
+            if payload.idempotency_key:
+                existing = TableManagementService._idempotent_open(
+                    db,
+                    business_id=business_id,
+                    branch_id=branch_id,
+                    table_id=table_id,
+                    idempotency_key=payload.idempotency_key,
+                )
+                if existing:
+                    TableManagementService._validate_idempotent_open(existing, request_hash)
+                    order = TableManagementService._order(db, existing)
+                    return TableSessionOpenResponse(
+                        session=TableManagementService._session_response(db, existing),
+                        order=OrderService._response(db, order),
+                    )
+            if TableManagementService._active_link(db, table_id):
                 raise DomainError(409, "TABLE_ALREADY_OCCUPIED", "Table already has an active session.") from exc
             raise
         except Exception:
@@ -252,6 +346,7 @@ class TableManagementService:
             order = TableManagementService._order(db, session)
             if order:
                 order.customer_id = payload.customer_id
+                order.version += 1
         if "guest_count" in payload.model_fields_set:
             session.guest_count = payload.guest_count
         if "notes" in payload.model_fields_set:

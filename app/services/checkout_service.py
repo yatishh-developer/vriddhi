@@ -1,3 +1,4 @@
+import hashlib
 import json
 import uuid
 from decimal import Decimal
@@ -24,6 +25,16 @@ from schemas.checkout_schema import (
 from services.billing_engine import BillingEngine, as_decimal, money
 from services.inventory_service import InventoryService
 from services.domain_event_service import DomainEventService
+from utils.invoice import InvoiceGenerator
+
+
+PAYMENT_METHOD_COMPONENTS = {
+    "CASH": frozenset({"cash"}),
+    "UPI": frozenset({"upi"}),
+    "CARD": frozenset({"card"}),
+    "OTHER": frozenset({"other"}),
+    "CREDIT": frozenset({"credit"}),
+}
 
 
 class CheckoutService:
@@ -48,9 +59,18 @@ class CheckoutService:
         if request.discount > 0 and principal.actor_type == ActorType.WORKER:
             require_permission(principal, "billing.discount")
 
+        request_fingerprint = (
+            CheckoutService.request_fingerprint(request, order_id=order_id)
+            if request.idempotency_key else None
+        )
         if request.idempotency_key:
             existing = CheckoutService._by_idempotency(db, principal.business_id, branch_id, source_app, request.idempotency_key)
             if existing:
+                CheckoutService.validate_idempotent_result(
+                    existing,
+                    order_id=order_id,
+                    request_fingerprint=request_fingerprint,
+                )
                 return existing
         if legacy_transaction_id:
             existing = db.query(Transaction).filter(
@@ -76,7 +96,13 @@ class CheckoutService:
                 previous_balance=customer.balance_remaining if customer else Decimal("0"),
                 is_intra_state=True,
             )
-            CheckoutService._validate_payment(principal, request, totals.payable, customer)
+            CheckoutService._validate_payment(
+                principal,
+                request,
+                totals.payable,
+                customer,
+                strict_method_contract=order_id is not None,
+            )
             created_by = CheckoutService._audit_user_id(db, principal)
             transaction = CheckoutService._create_transaction(
                 principal=principal,
@@ -88,6 +114,7 @@ class CheckoutService:
                 transaction_id=legacy_transaction_id or str(uuid.uuid4()),
                 created_by=created_by,
                 order_id=order_id,
+                request_fingerprint=request_fingerprint,
             )
             db.add(transaction)
             db.flush()
@@ -146,6 +173,11 @@ class CheckoutService:
             if request.idempotency_key:
                 existing = CheckoutService._by_idempotency(db, principal.business_id, branch_id, source_app, request.idempotency_key)
                 if existing:
+                    CheckoutService.validate_idempotent_result(
+                        existing,
+                        order_id=order_id,
+                        request_fingerprint=request_fingerprint,
+                    )
                     return existing
             raise DomainError(409, "CHECKOUT_ALREADY_PROCESSED", "Checkout was already processed.") from exc
         except Exception:
@@ -154,6 +186,7 @@ class CheckoutService:
 
     @staticmethod
     def response(transaction: Transaction) -> CheckoutResponse:
+        line_snapshots = CheckoutService._line_snapshots(transaction)
         items = [
             CheckoutItemResponse(
                 product_id=item.product_id,
@@ -161,14 +194,21 @@ class CheckoutService:
                 quantity=item.quantity,
                 unit_price=as_decimal(item.price),
                 subtotal=as_decimal(item.subtotal),
-                gst_percentage=Decimal("0"),
-                tax=Decimal("0"),
+                gst_percentage=line_snapshots.get(item.product_id, Decimal("0")),
+                tax=money(
+                    as_decimal(item.subtotal)
+                    * line_snapshots.get(item.product_id, Decimal("0"))
+                    / Decimal("100")
+                ),
             )
             for item in transaction.items
         ]
         return CheckoutResponse(
+            order_id=transaction.order_id,
             transaction_id=transaction.id,
             bill_number=transaction.bill_no,
+            payment_method=transaction.payment_method,
+            payment_option=transaction.payment_option,
             subtotal=as_decimal(transaction.subtotal),
             total_cgst=as_decimal(transaction.total_cgst),
             total_sgst=as_decimal(transaction.total_sgst),
@@ -198,6 +238,90 @@ class CheckoutService:
         ).first()
 
     @staticmethod
+    def request_fingerprint(request: CheckoutRequest, *, order_id: str | None) -> str:
+        """Create a durable fingerprint of the client checkout intent.
+
+        Product prices and taxes are deliberately excluded because the server
+        resolves them authoritatively.  A repeated mutation key must carry the
+        same client intent; otherwise returning an old financial result would
+        be ambiguous and unsafe.
+        """
+        payment = request.payment
+        payload = {
+            "order_id": order_id,
+            "branch_id": request.branch_id or "main",
+            "customer_id": request.customer_id,
+            "discount": str(money(as_decimal(request.discount))),
+            "is_parcel": bool(request.is_parcel),
+            "items": sorted(
+                [
+                    {
+                        "product_id": item.product_id,
+                        "quantity": item.quantity,
+                        "notes": item.notes,
+                        "variant_id": item.variant_id,
+                        "addons": list(item.addons),
+                    }
+                    for item in request.items
+                ],
+                key=lambda item: (
+                    item["product_id"], item["quantity"], item["notes"] or "",
+                    item["variant_id"] or "", tuple(item["addons"]),
+                ),
+            ),
+            "payment": {
+                "cash_amount": str(money(as_decimal(payment.cash_amount))),
+                "upi_amount": str(money(as_decimal(payment.upi_amount))),
+                "card_amount": str(money(as_decimal(payment.card_amount))),
+                "other_paid_amount": str(money(as_decimal(payment.other_paid_amount))),
+                "credit_amount": str(money(as_decimal(payment.credit_amount))),
+                "payment_method": str(payment.payment_method or "").strip().upper(),
+                "payment_option": str(payment.payment_option or "").strip().upper(),
+            },
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def validate_idempotent_result(
+        transaction: Transaction,
+        *,
+        order_id: str | None,
+        request_fingerprint: str | None,
+    ) -> None:
+        if order_id is not None and transaction.order_id != order_id:
+            raise DomainError(
+                409,
+                "IDEMPOTENCY_CONFLICT",
+                "This checkout key belongs to a different order.",
+            )
+        if (
+            request_fingerprint
+            and transaction.checkout_request_hash
+            and transaction.checkout_request_hash != request_fingerprint
+        ):
+            raise DomainError(
+                409,
+                "IDEMPOTENCY_CONFLICT",
+                "This checkout key was already used with different checkout details.",
+            )
+
+    @staticmethod
+    def _line_snapshots(transaction: Transaction) -> dict[str, Decimal]:
+        """Recover immutable line tax rates from the server-created snapshot."""
+        try:
+            raw_lines = json.loads(transaction.items_json or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_lines = []
+        if not isinstance(raw_lines, list):
+            return {}
+        return {
+            str(line["product_id"]): as_decimal(line.get("gst_percentage", 0))
+            for line in raw_lines
+            if isinstance(line, dict) and line.get("product_id")
+        }
+
+    @staticmethod
     def _locked_customer(db: Session, business_id: str, customer_id: str | None) -> Customer | None:
         if not customer_id:
             return None
@@ -211,17 +335,27 @@ class CheckoutService:
         return customer
 
     @staticmethod
-    def _validate_payment(principal: PrincipalContext, request: CheckoutRequest, payable: Decimal, customer: Customer | None) -> None:
+    def _validate_payment(
+        principal: PrincipalContext,
+        request: CheckoutRequest,
+        payable: Decimal,
+        customer: Customer | None,
+        *,
+        strict_method_contract: bool,
+    ) -> None:
         payment = request.payment
         values = [payment.cash_amount, payment.upi_amount, payment.card_amount, payment.other_paid_amount, payment.credit_amount]
         if any(value < 0 for value in values):
             raise DomainError(400, "PAYMENT_INVALID", "Payment amounts cannot be negative.")
         paid = money(payment.cash_amount + payment.upi_amount + payment.card_amount + payment.other_paid_amount)
         credit = money(payment.credit_amount)
-        if paid > payable:
-            raise DomainError(400, "PAYMENT_INVALID", "Overpayment is not supported.")
-        if paid + credit < payable:
+        allocated = money(paid + credit)
+        if allocated < payable:
             raise DomainError(400, "PAYMENT_INSUFFICIENT", "Payment does not cover the payable amount.")
+        if allocated > payable:
+            raise DomainError(400, "PAYMENT_INVALID", "Payment allocation exceeds the payable amount; change is not supported.")
+        if strict_method_contract:
+            CheckoutService._validate_payment_method(payment)
         if credit > 0:
             if not customer:
                 raise DomainError(400, "CUSTOMER_REQUIRED_FOR_CREDIT", "Credit payment requires a customer.")
@@ -230,7 +364,30 @@ class CheckoutService:
                     raise DomainError(403, "CREDIT_NOT_ALLOWED", "You do not have permission to create a credit sale.")
 
     @staticmethod
-    def _create_transaction(*, principal, request, source_app, branch_id, customer, totals, transaction_id, created_by, order_id=None):
+    def _validate_payment_method(payment) -> None:
+        method = str(payment.payment_method or "").strip().upper()
+        amounts = {
+            "cash": money(as_decimal(payment.cash_amount)),
+            "upi": money(as_decimal(payment.upi_amount)),
+            "card": money(as_decimal(payment.card_amount)),
+            "other": money(as_decimal(payment.other_paid_amount)),
+            "credit": money(as_decimal(payment.credit_amount)),
+        }
+        active_components = {name for name, amount in amounts.items() if amount > 0}
+        if method == "SPLIT":
+            if len(active_components) < 2:
+                raise DomainError(400, "PAYMENT_INVALID", "Split payment requires at least two payment components.")
+            return
+        expected_components = PAYMENT_METHOD_COMPONENTS.get(method)
+        if not expected_components or active_components != expected_components:
+            raise DomainError(
+                400,
+                "PAYMENT_INVALID",
+                "Payment method does not match the submitted payment allocation.",
+            )
+
+    @staticmethod
+    def _create_transaction(*, principal, request, source_app, branch_id, customer, totals, transaction_id, created_by, order_id=None, request_fingerprint=None):
         payment = request.payment
         items_json = json.dumps([
             {
@@ -250,7 +407,7 @@ class CheckoutService:
             order_id=order_id,
             customer_id=customer.id if customer else None,
             flow="Staff" if principal.actor_type == ActorType.WORKER else "Quick",
-            bill_no=request.bill_no,
+            bill_no=request.bill_no or f"{InvoiceGenerator.generate_invoice_number()}-{transaction_id[:8].upper()}",
             bill_date=request.bill_date,
             bill_date_text=request.bill_date_text,
             customer_name=customer.name if customer else "",
@@ -281,6 +438,7 @@ class CheckoutService:
             source_app=source_app,
             sync_status="pending" if principal.actor_type == ActorType.WORKER else "synced",
             idempotency_key=request.idempotency_key,
+            checkout_request_hash=request_fingerprint,
             device_id=request.device_id or principal.device_id,
         )
 

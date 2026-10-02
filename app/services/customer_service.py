@@ -1,10 +1,106 @@
-from fastapi import HTTPException
+import uuid
 
+from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
+
+from auth.authorization import require_permission
+from auth.errors import DomainError
+from auth.principal import PrincipalContext
 from models.customer_model import Customer
 from repositories.customer_repository import CustomerRepository
+from services.domain_event_service import DomainEventService
+from services.order_service import OrderService
 
 
 class CustomerService:
+
+    @staticmethod
+    def create_scoped_v1(
+        db,
+        principal: PrincipalContext,
+        business_id: str,
+        branch_id: str,
+        payload,
+        *,
+        request_id: str | None,
+    ):
+        OrderService._scope(principal, business_id, branch_id)
+        require_permission(principal, "customers.create")
+        return CustomerService.create_v1(
+            db, principal, business_id, branch_id, payload, request_id=request_id
+        )
+
+    @staticmethod
+    def create_v1(
+        db,
+        principal: PrincipalContext,
+        business_id: str,
+        branch_id: str,
+        payload,
+        *,
+        request_id: str | None,
+    ):
+        """Create one business-owned customer with a retry-safe client key."""
+        existing = CustomerService._by_client_mutation(
+            db, business_id, payload.client_mutation_id
+        )
+        if existing:
+            return existing
+
+        customer = Customer(
+            id=str(uuid.uuid4()),
+            business_id=business_id,
+            name=payload.name,
+            phone=payload.phone or "",
+            email=payload.email,
+            address=payload.address or "",
+            balance_remaining=0,
+            loyal_customer=payload.loyal_customer,
+            preset_discount=payload.preset_discount,
+            client_mutation_id=payload.client_mutation_id,
+        )
+        try:
+            db.add(customer)
+            DomainEventService.enqueue(
+                db,
+                event_type="customer.created",
+                aggregate_type="customer",
+                aggregate_id=customer.id,
+                business_id=business_id,
+                branch_id=branch_id,
+                actor_id=principal.principal_id,
+                data={
+                    "client_mutation_id": payload.client_mutation_id,
+                    "request_id": request_id,
+                },
+            )
+            db.commit()
+            db.refresh(customer)
+            return customer
+        except IntegrityError as exc:
+            db.rollback()
+            existing = CustomerService._by_client_mutation(
+                db, business_id, payload.client_mutation_id
+            )
+            if existing:
+                return existing
+            raise DomainError(
+                409,
+                "CUSTOMER_CREATE_CONFLICT",
+                "Customer creation could not be completed.",
+            ) from exc
+
+    @staticmethod
+    def _by_client_mutation(db, business_id: str, client_mutation_id: str):
+        return (
+            db.query(Customer)
+            .filter(
+                Customer.business_id == business_id,
+                Customer.client_mutation_id == client_mutation_id,
+                Customer.is_deleted == False,
+            )
+            .first()
+        )
 
     @staticmethod
     def handle_queue_item(db, current_user, action: str, payload: dict):

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from auth.authorization import require_permission
@@ -10,7 +10,7 @@ from auth.principal import PrincipalContext
 from database.dependencies import get_db
 from repositories.customer_repository import CustomerRepository
 from repositories.product_repository import ProductRepository
-from schemas.customer_schema import CustomerResponse
+from schemas.customer_schema import CustomerResponse, V1CustomerCreate
 from schemas.order_schema import (
     OrderCancelRequest,
     OrderCheckoutRequest,
@@ -24,6 +24,7 @@ from schemas.order_schema import (
 )
 from schemas.product_schema import ProductResponse
 from services.order_service import OrderService
+from services.customer_service import CustomerService
 
 
 router = APIRouter(prefix="/api/v1/businesses/{business_id}/branches/{branch_id}")
@@ -51,6 +52,26 @@ def list_customers(
     OrderService._scope(principal, business_id, branch_id)
     require_permission(principal, "customers.view")
     return CustomerRepository.get_all(db, business_id)
+
+
+@router.post("/customers", response_model=CustomerResponse, tags=["v1-customers"])
+def create_customer(
+    business_id: str,
+    branch_id: str,
+    payload: V1CustomerCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: PrincipalContext = Depends(get_principal_context),
+):
+    # Customers are business-owned; branch scope is authorization/audit context.
+    return CustomerService.create_scoped_v1(
+        db,
+        principal,
+        business_id,
+        branch_id,
+        payload,
+        request_id=getattr(request.state, "request_id", None),
+    )
 
 
 @router.post("/orders", response_model=OrderResponse, tags=["v1-orders"])

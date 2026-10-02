@@ -1,6 +1,7 @@
 import logging
 
 from fastapi import Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 
@@ -28,5 +29,22 @@ async def global_exception_handler(request: Request, exc: Exception):
                 "message": "An internal server error occurred. Please try again later.",
                 "request_id": getattr(request.state, "request_id", None),
             },
+        },
+    )
+
+
+async def request_validation_error_handler(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    """Keep malformed v1 checkout requests in the standard error envelope."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": "VALIDATION_ERROR",
+                "message": "Request validation failed.",
+                "request_id": getattr(request.state, "request_id", None),
+            }
         },
     )

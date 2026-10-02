@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -23,7 +24,10 @@ from routes.v1_kot_routes import router as v1_kot_router
 from routes.realtime_routes import router as realtime_router
 from middleware.logging_middleware import LoggingMiddleware
 from middleware.rate_limit_middleware import rate_limit_middleware
-from exception_handlers.global_exception_handler import global_exception_handler
+from exception_handlers.global_exception_handler import (
+    global_exception_handler,
+    request_validation_error_handler,
+)
 from auth.errors import ApiError, api_error_handler
 from middleware.request_id_middleware import RequestIdMiddleware
 from realtime.connection_manager import ConnectionManager
@@ -112,6 +116,7 @@ app.middleware("http")(rate_limit_middleware)
 
 app.add_exception_handler(Exception, global_exception_handler)
 app.add_exception_handler(ApiError, api_error_handler)
+app.add_exception_handler(RequestValidationError, request_validation_error_handler)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────

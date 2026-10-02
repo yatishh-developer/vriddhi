@@ -84,11 +84,14 @@ def test_admin_and_worker_create_kots_and_reject_unauthorized_or_retail(db):
     second = KotService.create(db, _worker(db), "cafe", "main", worker_order.id, KOTCreateRequest())
 
     assert first.kot_number == "KOT-000001"
+    assert first.order_status == "ACTIVE" and first.order_version == owner_order.version + 1
     assert second.kot_number == "KOT-000002"
     assert db.query(OutboxEvent).filter(OutboxEvent.event_type == "kot.created").count() == 2
     blocked_order = OrderService.create(db, _owner(), "cafe", "main", OrderCreate())
     blocked_order = OrderService.add_items(db, _owner(), "cafe", "main", blocked_order.id, OrderItemsCreate(items=[OrderItemCreate(product_id="fries", quantity=1)]))
     assert _error(lambda: KotService.create(db, _worker(db, "blocked"), "cafe", "main", blocked_order.id, KOTCreateRequest())) == "PERMISSION_DENIED"
+    assert _error(lambda: KotService.create(db, _owner(), "retail", "main", blocked_order.id, KOTCreateRequest())) == "BUSINESS_ACCESS_DENIED"
+    assert _error(lambda: KotService.create(db, _worker(db), "cafe", "other-branch", blocked_order.id, KOTCreateRequest())) == "BRANCH_ACCESS_DENIED"
     assert _error(lambda: KotService.create(db, _owner("retail"), "retail", "main", "missing", KOTCreateRequest())) == "CAPABILITY_NOT_AVAILABLE"
 
 
@@ -101,24 +104,39 @@ def test_multiple_kots_send_only_new_quantities_and_history_and_list_work(db):
 
     assert {(item.product_name_snapshot, item.quantity) for item in second.items} == {("Coffee", 1), ("Fries", 2)}
     assert all(item.product_name_snapshot != "Sandwich" for item in second.items)
+    assert {(item.product_name_snapshot, item.quantity) for item in second.print_payload.items} == {("Coffee", 1), ("Fries", 2)}
     assert _error(lambda: KotService.create(db, _owner(), "cafe", "main", order.id, KOTCreateRequest())) == "NO_UNSENT_KOT_ITEMS"
-    assert len(KotService.list_for_order(db, _owner(), "cafe", "main", order.id)) == 2
+    history = KotService.list_for_order(db, _owner(), "cafe", "main", order.id)
+    assert len(history) == 2
+    assert KotService.get(db, _owner(), "cafe", "main", second.id).id == second.id
     assert KotService.list(db, _owner(), "cafe", "main", status=None, order_id=order.id, table_session_id=None, created_from=None, created_to=None, page=1, page_size=25).total == 2
 
 
 def test_kot_idempotency_retry_and_kot_creation_have_no_financial_side_effects(db):
     order = _quick_order(db)
-    request = KOTCreateRequest(idempotency_key="thermal-retry")
+    request = KOTCreateRequest(idempotency_key="thermal-retry", notes="No plastic", expected_order_version=order.version)
     first = KotService.create(db, _owner(), "cafe", "main", order.id, request)
+    # Simulate a process/repository restart after the commit but before the
+    # client receives the response.
+    db.expunge_all()
     retry = KotService.create(db, _owner(), "cafe", "main", order.id, request)
 
     assert first.id == retry.id and first.kot_number == retry.kot_number
     assert db.query(KitchenOrderTicket).count() == 1
     assert db.query(KitchenOrderTicketItem).count() == 2
+    assert db.query(OutboxEvent).filter(OutboxEvent.event_type == "kot.created").count() == 1
     assert db.get(Product, "coffee").stock_quantity == 30
     assert db.query(Transaction).count() == 0
     assert db.query(InventoryMovement).count() == 0
     assert {item.kot_sent_quantity for item in db.query(__import__("models.order_model", fromlist=["OrderItem"]).OrderItem).all()} == {1, 2}
+    assert _error(lambda: KotService.create(
+        db,
+        _owner(),
+        "cafe",
+        "main",
+        order.id,
+        KOTCreateRequest(idempotency_key="thermal-retry", notes="Changed kitchen note", expected_order_version=order.version),
+    )) == "IDEMPOTENCY_CONFLICT"
 
 
 def test_lifecycle_and_sent_item_edit_cancellation_rules(db):
@@ -130,6 +148,7 @@ def test_lifecycle_and_sent_item_edit_cancellation_rules(db):
     assert served.status == "SERVED"
     event_types = {row.event_type for row in db.query(OutboxEvent).all()}
     assert {"kot.created", "kot.preparing", "kot.ready"}.issubset(event_types)
+    assert db.query(OutboxEvent).filter(OutboxEvent.event_type == "kot.served", OutboxEvent.aggregate_id == kot.id).count() == 1
     assert _error(lambda: KotService.update_status(db, _worker(db), "cafe", "main", kot.id, KOTStatusUpdateRequest(status="PREPARING"))) == "KOT_INVALID_TRANSITION"
 
     coffee_item = next(item for item in OrderService.get(db, _owner(), "cafe", "main", order.id).items if item.product_id == "coffee")
@@ -137,6 +156,11 @@ def test_lifecycle_and_sent_item_edit_cancellation_rules(db):
     cancellation = KotService.cancel_order_item_quantity(db, _worker(db), "cafe", "main", order.id, coffee_item.id, OrderItemCancelQuantityRequest(quantity=1, reason="Changed mind"))
     assert cancellation.quantity == 1
     assert db.query(KitchenKotCancellation).count() == 1
+    # Only the unsent portion may be reduced normally; the historic KOT item
+    # remains immutable and auditable.
+    reduced = OrderService.update_item(db, _owner(), "cafe", "main", order.id, coffee_item.id, OrderItemUpdate(quantity=1))
+    assert next(item.quantity for item in reduced.items if item.id == coffee_item.id) == 1
+    assert db.query(KitchenOrderTicketItem).filter(KitchenOrderTicketItem.kot_id == kot.id).count() == 2
     assert _error(lambda: OrderService.update_item(db, _owner(), "cafe", "main", order.id, coffee_item.id, OrderItemUpdate(quantity=0))) == "KOT_QUANTITY_ALREADY_SENT"
 
 

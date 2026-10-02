@@ -64,6 +64,8 @@ class KOTResponse(BaseModel):
     business_id: str
     branch_id: str
     order_id: str
+    order_status: str
+    order_version: int
     table_session_id: Optional[str] = None
     kot_number: str
     status: str
